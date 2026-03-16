@@ -60,6 +60,20 @@ def compute_separation(
 ) -> float:
     """Fisher-normalized centroid distance between two activation distributions.
 
+    Implements the separation metric from the CAZ framework (Henry 2026):
+
+        S(l) = ‖h̄_A^(l) − h̄_B^(l)‖₂ / √[ (1/2)( tr(Σ_A^(l)) + tr(Σ_B^(l)) ) ]
+
+    The denominator is the square root of the average trace of the two
+    within-class covariance matrices.  tr(Σ) = sum of per-dimension variances,
+    which is the total within-class spread in all directions.  Dividing by the
+    square root of the average gives the Fisher-normalized criterion that
+    corrects for layer-wise variation in activation dispersion.
+
+    Mahalanobis distance would account for full covariance structure but is
+    numerically unstable without regularization in high-dimensional spaces.
+    This formulation is the principled tradeoff described in the CAZ paper.
+
     Parameters
     ----------
     pos:
@@ -68,7 +82,8 @@ def compute_separation(
     neg:
         Activations for the negative class — shape ``[n_neg, hidden_dim]``.
     eps:
-        Small constant added to the denominator to prevent division by zero.
+        Small constant added to the denominator to prevent division by zero
+        in degenerate cases (zero within-class variance).
 
     Returns
     -------
@@ -82,14 +97,25 @@ def compute_separation(
     if len(pos) < 2 or len(neg) < 2:
         return 0.0
 
+    # Drop rows containing NaN before computing statistics.
+    # NaN propagates through mean/var and produces NaN results silently —
+    # the kind of silent corruption that produced the fp16 overflow failure.
+    pos = pos[np.isfinite(pos).all(axis=1)]
+    neg = neg[np.isfinite(neg).all(axis=1)]
+
+    if len(pos) < 2 or len(neg) < 2:
+        return 0.0
+
     mu_pos = pos.mean(axis=0)
     mu_neg = neg.mean(axis=0)
 
-    var_pos = pos.var(axis=0)
-    var_neg = neg.var(axis=0)
+    # tr(Σ) = sum of per-dimension variances (ddof=1 for unbiased estimate)
+    trace_pos = float(pos.var(axis=0, ddof=1).sum())
+    trace_neg = float(neg.var(axis=0, ddof=1).sum())
 
     centroid_dist = float(np.linalg.norm(mu_pos - mu_neg))
-    within_scatter = float(np.sqrt((var_pos + var_neg).mean())) + eps
+    # √[ (1/2)(tr(Σ_A) + tr(Σ_B)) ] — exact formula from CAZ paper §3.2
+    within_scatter = float(np.sqrt(0.5 * (trace_pos + trace_neg))) + eps
 
     return centroid_dist / within_scatter
 
@@ -128,12 +154,24 @@ def compute_coherence(
     if len(all_acts) < 2:
         return 0.0
 
+    # Drop rows containing NaN or Inf — sklearn PCA raises on non-finite input.
+    all_acts = all_acts[np.isfinite(all_acts).all(axis=1)]
+    if len(all_acts) < 2:
+        return 0.0
+
+    # Constant arrays have zero variance — PCA returns NaN explained_variance_ratio.
+    # Guard: if all rows are identical, there is no dominant direction → 0.0.
+    if np.all(all_acts == all_acts[0]):
+        return 0.0
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         pca = PCA(n_components=min(n_components, all_acts.shape[1]))
         pca.fit(all_acts)
 
-    return float(pca.explained_variance_ratio_[0])
+    ratio = float(pca.explained_variance_ratio_[0])
+    # PCA can return NaN when variance is numerically zero — return 0.0 in that case
+    return ratio if np.isfinite(ratio) else 0.0
 
 
 def compute_velocity(

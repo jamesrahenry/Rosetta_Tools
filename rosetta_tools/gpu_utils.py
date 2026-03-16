@@ -1,58 +1,68 @@
 """
-gpu_utils.py — Shared GPU/device utilities for the Rosetta Program.
+gpu_utils.py — Device selection, VRAM reporting, and model teardown.
 
-Centralises device selection, dtype resolution, VRAM reporting, and
-model teardown so that individual experiments don't reinvent this
-boilerplate.  Designed to be library-agnostic: works with both
-HuggingFace ``transformers`` and TransformerLens ``HookedTransformer``.
+Environment-aware: dtype defaults differ between laptop (consumer GPU or CPU)
+and datacenter hardware (H100/A100 class).
 
-Typical usage
--------------
-    from shared.gpu_utils import get_device, get_dtype, log_vram, release_model
+dtype policy
+------------
+H100 / A100 (Ampere+, VRAM ≥ 40 GB):
+    Default: bfloat16.  Same exponent range as float32 — cannot overflow at
+    deep-layer activations.  The fp16 overflow that corrupted the original
+    GPT-2-XL credibility results (L32+ Fisher normalization → 0) cannot
+    occur with bfloat16.  On 80 GB VRAM, memory is not the bottleneck.
 
-    # -- Setup ---------------------------------------------------------
-    device = get_device()            # "cuda" or "cpu"
-    dtype  = get_dtype(device)       # torch.float16 or torch.float32
+Consumer / laptop GPU (VRAM < 40 GB, or pre-Ampere):
+    Default: float32.  fp16 saves memory but introduces overflow risk for
+    deep models.  On a 4 GB laptop GPU running GPT-2-XL for a PoC, float32
+    is preferred; the model still fits and results are trustworthy.
 
-    # -- HuggingFace ---------------------------------------------------
-    model = SomeModel.from_pretrained(model_id, torch_dtype=dtype)
-    model = model.to(device)
-    log_vram("after model load")
+CPU:
+    Always float32.  bfloat16 CPU support is inconsistent.
 
-    # -- TransformerLens -----------------------------------------------
-    model = HookedTransformer.from_pretrained(model_id, device=device, dtype=dtype)
-    log_vram("after model load")
+The threshold (40 GB) distinguishes H100 (80 GB) and A100 (40/80 GB) from
+consumer cards (RTX 500 Ada = 4 GB, RTX 4090 = 24 GB, etc.).
 
-    # -- Teardown (important when loading multiple large models) --------
-    release_model(model)
-    log_vram("after release")
+Metric computation (Fisher normalization, PCA, covariance) is always done
+in float64 regardless of model dtype — see rosetta_tools.caz and
+rosetta_tools.extraction.  This module controls only forward-pass dtype.
 
 Public API
 ----------
-get_device(prefer: str = "auto") -> str
+get_device(prefer="auto") -> str
     Returns "cuda" or "cpu".
 
-get_dtype(device: str) -> torch.dtype
-    Returns torch.float16 for CUDA, torch.float32 for CPU.
+get_dtype(device, prefer="auto") -> torch.dtype
+    Returns the environment-appropriate dtype.
+    prefer="auto"     — bfloat16 on datacenter GPU, float32 elsewhere.
+    prefer="bfloat16" — bfloat16 if supported, else float32.
+    prefer="float32"  — always float32.
 
-log_vram(label: str = "", device_index: int = 0) -> None
-    Prints current allocated and total VRAM for the given CUDA device.
-    No-ops silently on CPU.
+vram_stats(device_index=0) -> dict | None
+    Current VRAM usage in GiB.  None on CPU.
 
-vram_stats(device_index: int = 0) -> dict | None
-    Returns a dict with VRAM numbers, or None on CPU.
+log_vram(label="", device_index=0) -> None
+    Print a one-line VRAM summary.  No-ops silently on CPU.
 
-release_model(model, *, clear_cache: bool = True) -> None
-    Deletes the model reference and optionally calls torch.cuda.empty_cache().
-    Safe to call on CPU (empty_cache is a no-op there).
+log_device_info(device, dtype) -> None
+    Print a startup banner confirming device, dtype, and VRAM.
+
+release_model(model, *, clear_cache=True) -> None
+    Delete model and free GPU memory.
 """
 
 from __future__ import annotations
 
 import gc
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
+
+DtypePreference = Literal["auto", "bfloat16", "float32"]
+
+# VRAM threshold above which hardware is treated as datacenter-class.
+# H100 = 80 GiB, A100 = 40/80 GiB.  Consumer cards top out at ~24 GiB.
+_DATACENTER_VRAM_GIB = 40.0
 
 
 # ---------------------------------------------------------------------------
@@ -61,14 +71,14 @@ import torch
 
 
 def get_device(prefer: str = "auto") -> str:
-    """Return the device string to use for model loading and tensor ops.
+    """Return the device string for model loading and tensor ops.
 
     Parameters
     ----------
     prefer:
-        ``"auto"``  — use CUDA if available, otherwise CPU (default).
-        ``"cuda"``  — require CUDA; raises ``RuntimeError`` if unavailable.
-        ``"cpu"``   — always use CPU, regardless of hardware.
+        ``"auto"``  — CUDA if available, otherwise CPU (default).
+        ``"cuda"``  — require CUDA; raises RuntimeError if unavailable.
+        ``"cpu"``   — always CPU.
 
     Returns
     -------
@@ -79,37 +89,82 @@ def get_device(prefer: str = "auto") -> str:
         return "cpu"
     if prefer == "cuda":
         if not torch.cuda.is_available():
-            raise RuntimeError(
-                "Device 'cuda' was requested but CUDA is not available on this system."
-            )
+            raise RuntimeError("Device 'cuda' was requested but CUDA is not available.")
         return "cuda"
-    # "auto"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # ---------------------------------------------------------------------------
-# dtype resolution
+# dtype selection
 # ---------------------------------------------------------------------------
 
 
-def get_dtype(device: str) -> torch.dtype:
-    """Return the appropriate floating-point dtype for the given device.
+def _is_datacenter_gpu(device_index: int = 0) -> bool:
+    """Return True if the current GPU has datacenter-class VRAM (≥ 40 GiB)."""
+    if not torch.cuda.is_available():
+        return False
+    props = torch.cuda.get_device_properties(device_index)
+    total_gib = props.total_memory / 1024**3
+    return total_gib >= _DATACENTER_VRAM_GIB
 
-    Uses fp16 on CUDA to reduce VRAM usage (e.g. GPT-2-XL fits in ~3 GB
-    instead of ~6 GB).  Falls back to fp32 on CPU where fp16 arithmetic
-    is typically slower and numerically less stable.
+
+def get_dtype(
+    device: str,
+    prefer: DtypePreference = "auto",
+) -> torch.dtype:
+    """Return the appropriate dtype for model weights and forward passes.
+
+    Environment-aware: dtype is chosen based on detected hardware when
+    ``prefer="auto"`` (the default).
+
+    Datacenter GPU (H100 / A100, VRAM ≥ 40 GiB):
+        bfloat16.  Same exponent range as float32 — cannot overflow at
+        deep-layer activations.  80 GB VRAM means memory is not the
+        constraint.  This is the dtype for H100 DO droplet runs.
+
+    Consumer / laptop GPU (VRAM < 40 GiB):
+        float32.  fp16 saves memory but introduces silent overflow risk
+        for deep models (the Fisher normalization failure in the original
+        GPT-2-XL credibility results was caused by fp16 on a 4 GB card).
+        For PoC runs on a laptop, correctness matters more than throughput.
+
+    CPU:
+        float32 always.  bfloat16 CPU support is inconsistent.
 
     Parameters
     ----------
     device:
         ``"cuda"`` or ``"cpu"``.
+    prefer:
+        ``"auto"``     — environment-aware selection (default).
+        ``"bfloat16"`` — bfloat16 if GPU supports it, else float32.
+        ``"float32"``  — always float32.
 
     Returns
     -------
     torch.dtype
-        ``torch.float16`` for CUDA, ``torch.float32`` for CPU.
     """
-    return torch.float16 if device == "cuda" else torch.float32
+    if device == "cpu":
+        return torch.float32
+
+    if prefer == "float32":
+        return torch.float32
+
+    if prefer == "bfloat16":
+        if torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        # Pre-Ampere GPU — fall back to float32, not float16
+        return torch.float32
+
+    # "auto" — environment-aware
+    if _is_datacenter_gpu():
+        # Datacenter: bfloat16 if supported (it will be on any H100/A100)
+        if torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        return torch.float32
+    else:
+        # Consumer / laptop: float32 for numerical safety
+        return torch.float32
 
 
 # ---------------------------------------------------------------------------
@@ -118,21 +173,16 @@ def get_dtype(device: str) -> torch.dtype:
 
 
 def vram_stats(device_index: int = 0) -> Optional[dict]:
-    """Return a dict with VRAM usage figures, or None if CUDA is unavailable.
+    """Return current VRAM usage figures, or None on CPU.
 
-    All values are in gibibytes (GiB, 1024³ bytes).
-
-    Parameters
-    ----------
-    device_index:
-        CUDA device ordinal (0 for the first GPU).
+    All values are in gibibytes (GiB).
 
     Returns
     -------
-    dict or None
-        Keys: ``"allocated_gib"``, ``"reserved_gib"``, ``"total_gib"``,
-        ``"free_gib"``, ``"device_name"``.
-        Returns ``None`` on CPU-only systems.
+    dict with keys:
+        ``"device_name"``, ``"allocated_gib"``, ``"reserved_gib"``,
+        ``"total_gib"``, ``"free_gib"``.
+    None if CUDA is unavailable.
     """
     if not torch.cuda.is_available():
         return None
@@ -141,42 +191,58 @@ def vram_stats(device_index: int = 0) -> Optional[dict]:
     total = props.total_memory / 1024**3
     allocated = torch.cuda.memory_allocated(device_index) / 1024**3
     reserved = torch.cuda.memory_reserved(device_index) / 1024**3
-    free = total - reserved  # conservative free estimate
 
     return {
         "device_name": props.name,
         "allocated_gib": allocated,
         "reserved_gib": reserved,
         "total_gib": total,
-        "free_gib": free,
+        "free_gib": total - reserved,  # conservative: reserved - allocated stays pooled
     }
 
 
 def log_vram(label: str = "", device_index: int = 0) -> None:
-    """Print a one-line VRAM summary to stdout.
-
-    No-ops silently when CUDA is unavailable, so it is safe to call
-    unconditionally in scripts that support both CPU and GPU paths.
-
-    Parameters
-    ----------
-    label:
-        Optional context string printed alongside the numbers
-        (e.g. ``"after model load"``).
-    device_index:
-        CUDA device ordinal.
-    """
+    """Print a one-line VRAM summary.  No-ops silently on CPU."""
     stats = vram_stats(device_index)
     if stats is None:
         return
-
     context = f" [{label}]" if label else ""
     print(
-        f"VRAM{context}: {stats['allocated_gib']:.2f} GiB allocated / "
+        f"VRAM{context}: "
+        f"{stats['allocated_gib']:.2f} GiB allocated / "
         f"{stats['reserved_gib']:.2f} GiB reserved / "
         f"{stats['total_gib']:.1f} GiB total  "
         f"({stats['device_name']})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Startup banner
+# ---------------------------------------------------------------------------
+
+
+def log_device_info(device: str, dtype: torch.dtype) -> None:
+    """Print a startup summary before a long model run.
+
+    Confirms device, dtype, and available VRAM so that misconfiguration
+    is visible before the (potentially slow) model download begins.
+    """
+    dtype_name = {
+        torch.bfloat16: "bfloat16",
+        torch.float32: "float32",
+        torch.float16: "float16",
+    }.get(dtype, str(dtype))
+
+    if device == "cuda":
+        stats = vram_stats()
+        if stats:
+            print(
+                f"Device: {device} ({stats['device_name']})  |  "
+                f"dtype: {dtype_name}  |  "
+                f"VRAM free: {stats['free_gib']:.1f} / {stats['total_gib']:.1f} GiB"
+            )
+            return
+    print(f"Device: {device}  |  dtype: {dtype_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -187,57 +253,20 @@ def log_vram(label: str = "", device_index: int = 0) -> None:
 def release_model(model, *, clear_cache: bool = True) -> None:
     """Delete a model and free GPU memory.
 
-    When loading multiple large models sequentially (e.g. source and
-    target models in an alignment experiment) it is important to
-    explicitly release each model before loading the next one.
-    Python's reference-counting GC is not always enough because
+    When loading multiple large models sequentially, explicit release is
+    important — Python's reference-counting GC is not sufficient because
     CUDA tensors can linger in the memory allocator's pool.
 
     Parameters
     ----------
     model:
-        Any PyTorch model (HuggingFace, TransformerLens, etc.).
-        The reference is deleted; do not use the variable afterward.
+        Any PyTorch model.  Do not use the variable after calling this.
     clear_cache:
-        If ``True`` (default), call ``torch.cuda.empty_cache()`` after
-        deletion, returning pooled memory to the OS/CUDA allocator.
-        Set to ``False`` only if you are loading a replacement model
-        immediately and want to avoid the cache-flush overhead.
+        If True (default), call torch.cuda.empty_cache() after deletion,
+        returning pooled memory to the CUDA allocator.  Set to False only
+        if loading a replacement model immediately.
     """
     del model
     gc.collect()
     if clear_cache and torch.cuda.is_available():
         torch.cuda.empty_cache()
-
-
-# ---------------------------------------------------------------------------
-# Convenience: print a startup banner
-# ---------------------------------------------------------------------------
-
-
-def log_device_info(device: str, dtype: torch.dtype) -> None:
-    """Print a short startup summary of the selected device and dtype.
-
-    Useful at the top of experiment scripts to confirm configuration
-    before the (potentially slow) model download/load begins.
-
-    Parameters
-    ----------
-    device:
-        ``"cuda"`` or ``"cpu"``.
-    dtype:
-        The torch dtype that will be used for model parameters.
-    """
-    dtype_name = "fp16" if dtype == torch.float16 else "fp32"
-    if device == "cuda":
-        stats = vram_stats()
-        if stats:
-            print(
-                f"Device: {device} ({stats['device_name']})  |  "
-                f"dtype: {dtype_name}  |  "
-                f"VRAM available: {stats['free_gib']:.1f} / {stats['total_gib']:.1f} GiB"
-            )
-        else:
-            print(f"Device: {device}  |  dtype: {dtype_name}")
-    else:
-        print(f"Device: {device}  |  dtype: {dtype_name}  |  (no GPU)")

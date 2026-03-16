@@ -47,7 +47,7 @@ PoolStrategy = Literal["mean", "last", "first", "cls"]
 def _pool(
     hidden_states: torch.Tensor,
     attention_mask: torch.Tensor,
-    strategy: PoolStrategy = "mean",
+    strategy: PoolStrategy = "last",
 ) -> torch.Tensor:
     """Pool a batch of hidden states to one vector per sequence.
 
@@ -58,8 +58,12 @@ def _pool(
     attention_mask:
         Shape ``[batch, seq_len]``.  1 for real tokens, 0 for padding.
     strategy:
-        ``"mean"``  — mean over non-padding tokens (recommended for most uses).
-        ``"last"``  — last non-padding token (good for causal/decoder models).
+        ``"last"``  — last non-padding token (default; correct for causal/decoder
+                      models — GPT-2, Llama, Mistral, Qwen, etc.  The last token
+                      position is where the model has attended to full context and
+                      committed to a representation, matching the CAZ framework's
+                      residual stream tracking methodology).
+        ``"mean"``  — mean over non-padding tokens.
         ``"first"`` — first token (embedding / CLS position).
         ``"cls"``   — alias for ``"first"``.
 
@@ -95,7 +99,7 @@ def extract_layer_activations(
     texts: list[str],
     device: str = "cpu",
     batch_size: int = 8,
-    pool: PoolStrategy = "mean",
+    pool: PoolStrategy = "last",
     max_length: int = 512,
 ) -> list[NDArray[np.float32]]:
     """Extract residual-stream activations at every layer for a list of texts.
@@ -179,7 +183,7 @@ def extract_contrastive_activations(
     neg_texts: list[str],
     device: str = "cpu",
     batch_size: int = 8,
-    pool: PoolStrategy = "mean",
+    pool: PoolStrategy = "last",
     max_length: int = 512,
 ) -> list[tuple[NDArray[np.float32], NDArray[np.float32]]]:
     """Extract activations for positive and negative class texts.
