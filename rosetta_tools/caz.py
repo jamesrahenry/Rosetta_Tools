@@ -345,3 +345,60 @@ def find_caz_boundary(
         peak_separation=peak_sep,
         threshold=threshold,
     )
+
+
+# ---------------------------------------------------------------------------
+# Regional statistics
+# ---------------------------------------------------------------------------
+
+
+def compute_caz_statistics(
+    metrics: list[LayerMetrics],
+    boundary: CAZBoundary,
+) -> dict:
+    """Compute per-region summary statistics for a CAZ result.
+
+    Splits the model into pre-CAZ, CAZ, and post-CAZ regions and reports
+    mean/max separation and coherence for each.
+
+    Parameters
+    ----------
+    metrics:
+        Output of ``compute_layer_metrics()``.
+    boundary:
+        Output of ``find_caz_boundary()``.
+
+    Returns
+    -------
+    dict
+        Keys: ``pre_caz``, ``caz``, ``post_caz`` — each a sub-dict with
+        ``mean_separation``, ``std_separation``, ``n_layers``, and
+        (for the CAZ region) ``max_separation`` and ``mean_coherence``.
+    """
+    seps = np.array([m.separation for m in metrics])
+    cohs = np.array([m.coherence for m in metrics])
+    s, e = boundary.caz_start, boundary.caz_end
+
+    pre = seps[:s] if s > 0 else np.array([])
+    caz = seps[s : e + 1]
+    post = seps[e + 1 :] if e < len(seps) - 1 else np.array([])
+
+    def _region(arr: np.ndarray) -> dict:
+        if len(arr) == 0:
+            return {"mean_separation": 0.0, "std_separation": 0.0, "n_layers": 0}
+        return {
+            "mean_separation": float(arr.mean()),
+            "std_separation": float(arr.std()),
+            "n_layers": len(arr),
+        }
+
+    stats = {
+        "pre_caz": _region(pre),
+        "caz": {
+            **_region(caz),
+            "max_separation": float(caz.max()) if len(caz) else 0.0,
+            "mean_coherence": float(cohs[s : e + 1].mean()) if len(caz) else 0.0,
+        },
+        "post_caz": _region(post),
+    }
+    return stats

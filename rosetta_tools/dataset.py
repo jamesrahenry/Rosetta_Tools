@@ -28,7 +28,10 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +246,40 @@ def validate_dataset(path: str | Path) -> list[str]:
                 )
 
     return issues
+
+
+def load_pairs_df(path: str | Path) -> "pd.DataFrame":
+    """Load a JSONL contrastive pair file as a flat pandas DataFrame.
+
+    Each row is one pair. Columns: pair_id, domain, topic, concept,
+    model_name, pos_text, neg_text.
+
+    Parameters
+    ----------
+    path:
+        Path to the ``.jsonl`` file.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per pair, indexed by pair_id.
+    """
+    import pandas as pd
+
+    pairs = load_pairs(path)
+    rows = [
+        {
+            "pair_id": p.pair_id,
+            "domain": p.domain,
+            "topic": p.topic,
+            "concept": p.concept,
+            "model_name": p.model_name,
+            "pos_text": p.pos_text,
+            "neg_text": p.neg_text,
+        }
+        for p in pairs
+    ]
+    return pd.DataFrame(rows).set_index("pair_id")
 
 
 def dataset_summary(path: str | Path) -> dict:
