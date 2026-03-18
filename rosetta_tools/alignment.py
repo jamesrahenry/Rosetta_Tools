@@ -51,12 +51,19 @@ def cosine_similarity(v1: NDArray, v2: NDArray) -> float:
 def compute_procrustes_rotation(
     source_acts: NDArray,
     target_acts: NDArray,
+    n_components: int | None = None,
 ) -> NDArray:
     """Find the orthogonal rotation R that maps target space → source space.
 
     Solves the Orthogonal Procrustes problem:
-        minimize  ‖source_centered − target_centered @ R‖_F
+        minimize  ‖source_proj − target_proj @ R‖_F
         subject to  R^T R = I
+
+    When source and target have different hidden dimensions (common in
+    cross-architecture comparison, e.g. GPT-2 at 768 vs Llama at 4096),
+    both activation matrices are projected to a shared subspace via PCA
+    before fitting the rotation. The number of components defaults to
+    min(d_src, d_tgt, n_texts).
 
     Parameters
     ----------
@@ -65,20 +72,28 @@ def compute_procrustes_rotation(
         Texts must be in the same order as target_acts.
     target_acts:
         Calibration activations from the model being aligned — shape [n, d_tgt].
-        d_src need not equal d_tgt; if they differ, the rotation maps
-        from d_tgt to d_src via a rectangular orthogonal matrix.
+    n_components:
+        Dimensionality of the shared PCA subspace. Only used when d_src ≠ d_tgt.
+        Defaults to min(d_src, d_tgt, n_texts).
 
     Returns
     -------
     NDArray
-        Rotation matrix R of shape [d_tgt, d_src] such that
-        ``target_centered @ R ≈ source_centered``.
+        Rotation matrix R of shape [k, k] (where k = n_components or d if same-dim)
+        such that ``target_proj @ R ≈ source_proj``.
     """
+    from sklearn.decomposition import PCA
+
     source = np.asarray(source_acts, dtype=np.float64)
     target = np.asarray(target_acts, dtype=np.float64)
 
     source -= source.mean(axis=0)
     target -= target.mean(axis=0)
+
+    if source.shape[1] != target.shape[1]:
+        k = n_components or min(source.shape[1], target.shape[1], source.shape[0])
+        source = PCA(n_components=k).fit_transform(source)
+        target = PCA(n_components=k).fit_transform(target)
 
     # orthogonal_procrustes(A, B) finds R minimising ||A @ R - B||
     # We want R s.t. target @ R ≈ source, so A=target, B=source
@@ -110,8 +125,15 @@ def align_and_score(
     target_vec: NDArray,
     source_acts: NDArray,
     target_acts: NDArray,
+    n_components: int | None = None,
 ) -> dict:
     """Align target → source and report raw and aligned cosine similarity.
+
+    When source and target have different hidden dimensions, both activation
+    matrices and concept vectors are projected to a shared PCA subspace
+    before Procrustes alignment. The raw cosine similarity is computed in
+    the original spaces (or as close as possible — if dims differ, raw cosine
+    is reported as NaN since the spaces are not directly comparable).
 
     Parameters
     ----------
@@ -120,27 +142,52 @@ def align_and_score(
     target_vec:
         Dominant concept direction from the target model.
     source_acts:
-        Calibration activations from the source model [n_texts, hidden_dim].
+        Calibration activations from the source model [n_texts, d_src].
     target_acts:
-        Calibration activations from the target model [n_texts, hidden_dim].
+        Calibration activations from the target model [n_texts, d_tgt].
+    n_components:
+        PCA components for cross-dim alignment. See compute_procrustes_rotation.
 
     Returns
     -------
     dict
-        ``raw_cosine``    — cosine similarity before alignment
+        ``raw_cosine``     — cosine similarity before alignment (NaN if dims differ)
         ``aligned_cosine`` — cosine similarity after Procrustes alignment
-        ``alignment_gain`` — improvement (aligned − raw)
+        ``alignment_gain`` — improvement (aligned − raw; NaN if dims differ)
+        ``same_dim``       — whether source and target share hidden dimension
     """
-    raw = cosine_similarity(source_vec, target_vec)
+    from sklearn.decomposition import PCA
 
-    R = compute_procrustes_rotation(source_acts, target_acts)
-    aligned_target = apply_rotation(target_vec, R)
-    aligned = cosine_similarity(source_vec, aligned_target)
+    src_v = np.asarray(source_vec, dtype=np.float64)
+    tgt_v = np.asarray(target_vec, dtype=np.float64)
+    src_a = np.asarray(source_acts, dtype=np.float64)
+    tgt_a = np.asarray(target_acts, dtype=np.float64)
+
+    same_dim = src_v.shape[0] == tgt_v.shape[0]
+    raw = cosine_similarity(src_v, tgt_v) if same_dim else float("nan")
+
+    # Project to shared subspace when dims differ
+    if not same_dim:
+        k = n_components or min(src_a.shape[1], tgt_a.shape[1], src_a.shape[0])
+        src_pca = PCA(n_components=k).fit(src_a - src_a.mean(axis=0))
+        tgt_pca = PCA(n_components=k).fit(tgt_a - tgt_a.mean(axis=0))
+        src_a_proj = src_pca.transform(src_a - src_a.mean(axis=0))
+        tgt_a_proj = tgt_pca.transform(tgt_a - tgt_a.mean(axis=0))
+        src_v_proj = src_pca.transform(src_v.reshape(1, -1))[0]
+        tgt_v_proj = tgt_pca.transform(tgt_v.reshape(1, -1))[0]
+    else:
+        src_a_proj, tgt_a_proj = src_a, tgt_a
+        src_v_proj, tgt_v_proj = src_v, tgt_v
+
+    R = compute_procrustes_rotation(src_a_proj, tgt_a_proj)
+    aligned_tgt = apply_rotation(tgt_v_proj, R)
+    aligned = cosine_similarity(src_v_proj, aligned_tgt)
 
     return {
         "raw_cosine": raw,
         "aligned_cosine": aligned,
-        "alignment_gain": aligned - raw,
+        "alignment_gain": aligned - raw if same_dim else float("nan"),
+        "same_dim": same_dim,
     }
 
 
