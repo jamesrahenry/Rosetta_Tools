@@ -64,6 +64,13 @@ DtypePreference = Literal["auto", "bfloat16", "float32"]
 # H100 = 80 GiB, A100 = 40/80 GiB.  Consumer cards top out at ~24 GiB.
 _DATACENTER_VRAM_GIB = 40.0
 
+# GPU architectures known to have robust bf16 support (Ampere+).
+# Used to safely enable bf16 even on cards below the datacenter VRAM threshold.
+_BF16_CAPABLE_ARCHS = {"Ada", "Ampere", "Hopper", "Blackwell"}
+
+# Partial name matches for GPUs with native bf16 (for fallback when arch isn't reported)
+_BF16_CAPABLE_NAMES = {"L4", "L40", "A10", "A16", "RTX 40", "RTX 50", "RTX 30"}
+
 
 # ---------------------------------------------------------------------------
 # Device selection
@@ -106,6 +113,25 @@ def _is_datacenter_gpu(device_index: int = 0) -> bool:
     props = torch.cuda.get_device_properties(device_index)
     total_gib = props.total_memory / 1024**3
     return total_gib >= _DATACENTER_VRAM_GIB
+
+
+def _is_bf16_capable(device_index: int = 0) -> bool:
+    """Return True if the GPU natively supports bfloat16.
+
+    Checks compute capability (>= 8.0 is Ampere+) and falls back to
+    name-based matching for known bf16-capable cards like L4, A10, etc.
+    This allows bf16 on multi-GPU cloud VMs (e.g. 2×L4) where individual
+    GPUs are below the datacenter VRAM threshold but fully support bf16.
+    """
+    if not torch.cuda.is_available():
+        return False
+    props = torch.cuda.get_device_properties(device_index)
+    # Compute capability 8.0+ = Ampere or newer = native bf16
+    if props.major >= 8:
+        return True
+    # Fallback: name-based check
+    name = props.name
+    return any(n in name for n in _BF16_CAPABLE_NAMES)
 
 
 def get_dtype(
@@ -157,8 +183,8 @@ def get_dtype(
         return torch.float32
 
     # "auto" — environment-aware
-    if _is_datacenter_gpu():
-        # Datacenter: bfloat16 if supported (it will be on any H100/A100)
+    if _is_datacenter_gpu() or _is_bf16_capable():
+        # Datacenter or known bf16-capable GPU (L4, A10, RTX 30/40/50 series)
         if torch.cuda.is_bf16_supported():
             return torch.bfloat16
         return torch.float32
