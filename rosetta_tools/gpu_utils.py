@@ -54,6 +54,8 @@ release_model(model, *, clear_cache=True) -> None
 from __future__ import annotations
 
 import gc
+import shutil
+from pathlib import Path
 from typing import Literal, Optional
 
 import torch
@@ -296,3 +298,38 @@ def release_model(model, *, clear_cache: bool = True) -> None:
     gc.collect()
     if clear_cache and torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def purge_hf_cache(model_id: str) -> None:
+    """Delete a HuggingFace model from the local cache.
+
+    Useful when running many large models sequentially on disk-constrained
+    machines (e.g. cloud VMs). Call after extraction is complete and results
+    are saved — model weights are no longer needed.
+
+    Parameters
+    ----------
+    model_id:
+        HuggingFace model ID (e.g. ``"EleutherAI/pythia-6.9b"``).
+        Converted to the cache directory format (``models--org--name``).
+    """
+    cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+
+    # HF cache uses models--<org>--<name> directory format
+    cache_name = "models--" + model_id.replace("/", "--")
+    cache_dir = cache_root / cache_name
+
+    if cache_dir.exists():
+        size_gb = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file()) / 1024**3
+        shutil.rmtree(cache_dir)
+        print(f"Purged HF cache: {model_id} ({size_gb:.1f} GB freed)")
+    else:
+        # Try HF_HOME env var
+        import os
+        hf_home = os.environ.get("HF_HOME")
+        if hf_home:
+            cache_dir = Path(hf_home) / "hub" / cache_name
+            if cache_dir.exists():
+                size_gb = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file()) / 1024**3
+                shutil.rmtree(cache_dir)
+                print(f"Purged HF cache: {model_id} ({size_gb:.1f} GB freed)")
