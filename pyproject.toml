@@ -19,6 +19,9 @@ dependencies = [
     "pandas>=2.0",
     "scipy>=1.11",
     "matplotlib>=3.7",
+    "sentencepiece>=0.1.99",
+    "protobuf>=3.20",
+    "huggingface_hub>=0.20",
 ]
 
 [project.optional-dependencies]
