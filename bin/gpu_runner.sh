@@ -88,6 +88,35 @@ echo "=========================================="
 echo ""
 
 # ---------------------------------------------------------------------------
+# Sync repos — pull latest code before running anything
+# ---------------------------------------------------------------------------
+PROJECT_REPOS=(
+    "$HOME/semantic_convergence"
+    "$HOME/caz_scaling"
+    "$HOME/rosetta_tools"
+    "$HOME/Rosetta_Manifold"
+    "$HOME/Activation_Manifold_Cartography"
+    "$HOME/Concept_Assembly_Zone"
+)
+
+echo "Syncing repos..."
+for repo in "${PROJECT_REPOS[@]}"; do
+    if [[ -d "$repo/.git" ]]; then
+        echo -n "  $repo: "
+        if git -C "$repo" pull --ff-only --quiet 2>/dev/null; then
+            echo "✓"
+        else
+            echo "⚠ pull failed (dirty or diverged?) — continuing with local state"
+        fi
+        # Reinstall if it's an editable package (rosetta_tools)
+        if [[ -f "$repo/pyproject.toml" ]] && pip show "$(basename "$repo")" &>/dev/null; then
+            pip install -q -e "$repo" 2>/dev/null && echo "    ↳ reinstalled editable package"
+        fi
+    fi
+done
+echo ""
+
+# ---------------------------------------------------------------------------
 # Run jobs
 # ---------------------------------------------------------------------------
 JOB_NUM=0
