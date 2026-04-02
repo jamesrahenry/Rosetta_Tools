@@ -275,9 +275,10 @@ def safe_batch_size(requested: int, device: str = "cuda", reserve_gib: float = 2
         free *= 2
 
     if batch < requested:
-        log.warning(
-            "Reduced batch_size %d → %d (only %.1f GiB free of %.1f GiB)",
-            requested, batch, stats["free_gib"], total)
+        print(
+            f"WARNING: Reduced batch_size {requested} → {batch} "
+            f"(only {stats['free_gib']:.1f} GiB free of {total:.1f} GiB)"
+        )
 
     return batch
 
