@@ -88,6 +88,44 @@ echo "=========================================="
 echo ""
 
 # ---------------------------------------------------------------------------
+# MLflow tracking server
+# ---------------------------------------------------------------------------
+MLFLOW_STORE="$HOME/mlflow"
+MLFLOW_PORT=5111
+MLFLOW_URI="http://127.0.0.1:$MLFLOW_PORT"
+
+mkdir -p "$MLFLOW_STORE"
+
+if command -v mlflow &>/dev/null; then
+    # Check if already running
+    if ! curl -s "$MLFLOW_URI/health" &>/dev/null; then
+        echo "Starting MLflow server..."
+        mlflow server \
+            --backend-store-uri "sqlite:///$MLFLOW_STORE/mlflow.db" \
+            --default-artifact-root "$MLFLOW_STORE/artifacts" \
+            --host 0.0.0.0 \
+            --port "$MLFLOW_PORT" \
+            >> "$MLFLOW_STORE/server.log" 2>&1 &
+        MLFLOW_PID=$!
+        # Wait for it to come up
+        for i in $(seq 1 10); do
+            sleep 0.5
+            curl -s "$MLFLOW_URI/health" &>/dev/null && break
+        done
+        echo "  MLflow UI: $MLFLOW_URI"
+    else
+        echo "MLflow server already running at $MLFLOW_URI"
+    fi
+    export MLFLOW_TRACKING_URI="$MLFLOW_URI"
+    echo "  Tracking URI: $MLFLOW_TRACKING_URI"
+    echo "  Tunnel:  ssh -L $MLFLOW_PORT:localhost:$MLFLOW_PORT <this-host>"
+    echo ""
+else
+    echo "mlflow not installed — tracking disabled"
+    echo ""
+fi
+
+# ---------------------------------------------------------------------------
 # Sync repos — pull latest code before running anything
 # ---------------------------------------------------------------------------
 PROJECT_REPOS=(
