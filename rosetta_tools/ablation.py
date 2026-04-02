@@ -170,15 +170,34 @@ class DirectionalAblator:
         self._direction = d / d.norm()  # unit vector
 
     def _hook(self, module, input, output):
-        # HF layer outputs are tuples: (hidden_state, ...) or just a tensor
+        # HF layer outputs are tuples: (hidden_state, ...) or just a tensor.
+        # The hidden state is the element whose last dimension matches the
+        # concept direction.  For most architectures it's output[0], but some
+        # (e.g. OPT) may include attention outputs with different shapes.
         if isinstance(output, tuple):
-            hidden = output[0]
+            hidden = None
+            hidden_idx = 0
+            target_dim = self._direction.shape[0]
+            for i, o in enumerate(output):
+                if isinstance(o, torch.Tensor) and o.dim() == 3 and o.shape[-1] == target_dim:
+                    hidden = o
+                    hidden_idx = i
+                    break
+            if hidden is None:
+                # Fallback: use first tensor element
+                hidden = output[0]
+                hidden_idx = 0
         else:
             hidden = output
+            hidden_idx = None
 
         dev = hidden.device
         dt = hidden.dtype
         v = self._direction.to(device=dev, dtype=dt)
+
+        # Dimension mismatch guard — skip ablation rather than crash
+        if hidden.shape[-1] != v.shape[0]:
+            return output
 
         # Orthogonal projection: h' = h - (h·v)v
         # hidden shape: [batch, seq_len, hidden_dim]
@@ -187,7 +206,7 @@ class DirectionalAblator:
         ablated = hidden - proj_vec
 
         if isinstance(output, tuple):
-            return (ablated,) + output[1:]
+            return output[:hidden_idx] + (ablated,) + output[hidden_idx + 1:]
         return ablated
 
     def __enter__(self):
