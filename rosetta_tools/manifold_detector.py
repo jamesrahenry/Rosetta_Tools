@@ -65,6 +65,11 @@ class LayerManifoldResult:
     total_variance: float         # Sum of all eigenvalues
     top_eigenvalues: list[float]  # Largest eigenvalues (for plotting)
 
+    # Principal component directions (the actual features)
+    # Shape: [n_stored, hidden_dim] — unit vectors for the top PCs.
+    # None if store_directions=False to save memory in multi-model runs.
+    top_directions: NDArray | None
+
     # Known concept coverage
     concept_coverage: float       # Fraction of variance in concept subspace
     concept_dims: int             # Rank of concept subspace
@@ -165,6 +170,7 @@ def _layer_census(
     layer: int,
     concept_directions: dict[str, NDArray],
     n_top_eigenvalues: int = 50,
+    store_directions: bool = False,
 ) -> LayerManifoldResult:
     """Compute manifold census for one layer.
 
@@ -178,6 +184,10 @@ def _layer_census(
         Mapping of concept name → unit direction vector ``[hidden_dim]``.
     n_top_eigenvalues:
         How many eigenvalues to store for visualization.
+    store_directions:
+        If True, store the top principal component directions (eigenvectors)
+        in the result.  Required for cross-layer feature tracking.
+        Costs ~n_top × hidden_dim × 8 bytes per layer.
     """
     acts = np.asarray(activations, dtype=np.float64)
     n_samples, hidden_dim = acts.shape
@@ -287,6 +297,7 @@ def _layer_census(
         significant_dims=significant_dims,
         total_variance=total_variance,
         top_eigenvalues=eigenvalues[:n_top_eigenvalues].tolist(),
+        top_directions=pc_directions[:n_top_eigenvalues].copy() if store_directions else None,
         concept_coverage=concept_coverage,
         concept_dims=concept_rank if concept_names else 0,
         per_concept_variance=per_concept_var,
@@ -306,6 +317,7 @@ def layer_manifold_census(
     layer_activations: list[NDArray],
     concept_directions: dict[str, NDArray] | None = None,
     n_top_eigenvalues: int = 50,
+    store_directions: bool = False,
 ) -> ManifoldCensus:
     """Compute manifold census across all layers.
 
@@ -335,7 +347,7 @@ def layer_manifold_census(
 
     results = []
     for i, acts in enumerate(layer_activations):
-        results.append(_layer_census(acts, i, concept_dirs, n_top_eigenvalues))
+        results.append(_layer_census(acts, i, concept_dirs, n_top_eigenvalues, store_directions))
 
     return ManifoldCensus(
         n_layers=n_layers,
