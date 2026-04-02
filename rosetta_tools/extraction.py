@@ -17,7 +17,7 @@ Typical usage
     dtype  = get_dtype(device)
 
     tokenizer = AutoTokenizer.from_pretrained("gpt2-xl")
-    model     = AutoModel.from_pretrained("gpt2-xl", torch_dtype=dtype).to(device)
+    model     = AutoModel.from_pretrained("gpt2-xl", dtype=dtype).to(device)
     model.eval()
 
     texts  = ["The study conclusively shows...", "The evidence is mixed..."]
