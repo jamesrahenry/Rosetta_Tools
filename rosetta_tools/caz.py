@@ -433,6 +433,10 @@ class CAZRegion:
     One concept may have multiple regions (e.g. a shallow lexical peak
     and a deep compositional peak).  Each region has its own boundaries,
     peak, and summary statistics.
+
+    The ``caz_score`` is a composite strength metric that combines
+    separation prominence with coherence, allowing downstream code
+    to rank regions by importance without imposing hard thresholds.
     """
 
     start: int                     # first layer of this region
@@ -450,6 +454,12 @@ class CAZRegion:
     # Asymmetry within this region
     rise_span: int                 # layers from start to peak
     fall_span: int                 # layers from peak to end
+
+    # Composite strength score — higher means stronger assembly signal.
+    # Combines prominence (how much does S stand out from neighbors)
+    # with coherence (how geometrically organized is the direction).
+    # Range: 0+ (unbounded, but typically 0–1 for most regions).
+    caz_score: float = 0.0
 
 
 @dataclass
@@ -504,22 +514,8 @@ def find_caz_regions(
 ) -> CAZProfile:
     """Detect all significant assembly regions in the S(l) curve.
 
-    Unlike ``find_caz_boundary`` which assumes a single contiguous CAZ,
-    this function finds every significant separation peak and draws
-    boundaries around each one using the saddle points (local minima)
-    between peaks.
-
-    Region boundaries
-    -----------------
-    For multi-modal curves, each region extends from one saddle point to
-    the next.  The first region starts at layer 0; the last ends at the
-    final layer.  This avoids the problem of threshold-based boundaries
-    failing when S(l) never drops below the threshold (as happens with
-    concepts like credibility where separation stays high everywhere).
-
-    For unimodal curves (single peak), the region spans the full model.
-    Use the velocity-based ``find_caz_boundary`` for tighter single-peak
-    boundaries when that's what you need.
+    This is the legacy interface with a hard prominence threshold.
+    For inclusive detection with scoring, use ``find_caz_regions_scored``.
 
     Parameters
     ----------
@@ -538,6 +534,76 @@ def find_caz_regions(
     CAZProfile
         Full shape description with all detected regions.
     """
+    return find_caz_regions_scored(
+        metrics,
+        min_prominence_frac=min_prominence_frac,
+        min_peak_distance=min_peak_distance,
+    )
+
+
+def find_caz_regions_scored(
+    metrics: list[LayerMetrics],
+    min_prominence_frac: float = 0.005,
+    min_peak_distance: int = 2,
+) -> CAZProfile:
+    """Detect assembly regions with composite CAZ scoring.
+
+    Philosophy: cast a wide net, score everything, filter later.
+    Any bump in the separation curve that shows geometric organization
+    (coherence) is a candidate CAZ.  The ``caz_score`` on each region
+    lets downstream code decide what's strong enough to care about.
+
+    Detection
+    ---------
+    Uses scipy's ``find_peaks`` with a very low prominence floor
+    (default 0.5% of max separation) to catch even subtle assembly
+    events.  Every detected peak gets scored and returned.
+
+    Scoring
+    -------
+    The CAZ score combines three signals:
+
+        caz_score = prominence_norm × coherence_boost × width_factor
+
+    Where:
+      - ``prominence_norm`` = prominence / global_mean_separation
+        How much does the peak stand out, relative to baseline?
+      - ``coherence_boost`` = 1 + peak_coherence / mean_coherence
+        Does this peak have above-average geometric organization?
+        A peak with coherence at the model-wide mean scores 2.0;
+        above-mean scores higher.  This ensures a low-prominence
+        peak with strong coherence still gets a meaningful score.
+      - ``width_factor`` = sqrt(width / n_layers)
+        Wider regions are more sustained and less likely to be noise.
+        Square root prevents very wide regions from dominating.
+
+    The score is NOT a probability — it's an importance ranking.
+    Strong, coherent, sustained peaks score highest.  Weak, narrow,
+    incoherent bumps score near zero but are still reported.
+
+    Region boundaries
+    -----------------
+    Each region extends from one saddle point (local minimum between
+    peaks) to the next.  First region starts at layer 0; last ends
+    at the final layer.
+
+    Parameters
+    ----------
+    metrics:
+        Output of ``compute_layer_metrics()``.
+    min_prominence_frac:
+        Minimum peak prominence as a fraction of global max separation.
+        Default 0.005 (0.5%) — intentionally very low to be inclusive.
+        Use ``caz_score`` to filter rather than raising this.
+    min_peak_distance:
+        Minimum distance (in layers) between adjacent peaks.
+
+    Returns
+    -------
+    CAZProfile
+        All detected regions with ``caz_score`` populated.
+        Regions are sorted by layer index (start to end of model).
+    """
     if not metrics:
         raise ValueError("metrics list is empty")
 
@@ -548,12 +614,13 @@ def find_caz_regions(
     global_peak = int(np.argmax(seps))
     global_peak_sep = float(seps[global_peak])
     global_mean_sep = float(seps.mean())
+    global_mean_coh = float(cohs.mean()) if cohs.mean() > 0 else 1e-6
 
-    # Find all significant peaks
-    min_prominence = min_prominence_frac * global_peak_sep
+    # Find all peaks — very low prominence floor to be inclusive
+    min_prominence = max(min_prominence_frac * global_peak_sep, 1e-6)
     peak_indices, properties = find_peaks(
         seps,
-        prominence=max(min_prominence, 1e-6),
+        prominence=min_prominence,
         distance=min_peak_distance,
     )
 
@@ -568,7 +635,6 @@ def find_caz_regions(
     prominences = properties["prominences"][sort_order]
 
     # Find saddle points (local minima between consecutive peaks)
-    # to use as region boundaries
     saddles = []
     for i in range(len(peak_indices) - 1):
         segment = seps[peak_indices[i]:peak_indices[i + 1] + 1]
@@ -576,8 +642,7 @@ def find_caz_regions(
         saddle_layer = peak_indices[i] + saddle_offset
         saddles.append(saddle_layer)
 
-    # Build regions: each region extends from one saddle to the next
-    # First region starts at layer 0, last region ends at final layer
+    # Build regions: each extends from one saddle to the next
     region_starts = [0] + [s + 1 for s in saddles]
     region_ends = [s for s in saddles] + [n_layers - 1]
 
@@ -596,6 +661,12 @@ def find_caz_regions(
         region_seps = seps[start:end + 1]
         region_cohs = cohs[start:end + 1]
 
+        # ── CAZ score ──
+        prominence_norm = prominence / global_mean_sep if global_mean_sep > 0 else 0.0
+        coherence_boost = 1.0 + pk_coh / global_mean_coh
+        width_factor = np.sqrt(width / n_layers) if n_layers > 0 else 0.0
+        caz_score = prominence_norm * coherence_boost * width_factor
+
         regions.append(CAZRegion(
             start=start,
             peak=pk_idx,
@@ -610,6 +681,7 @@ def find_caz_regions(
             width_pct=100.0 * width / n_layers if n_layers > 0 else 0.0,
             rise_span=rise_span,
             fall_span=fall_span,
+            caz_score=round(caz_score, 6),
         ))
 
     return CAZProfile(
