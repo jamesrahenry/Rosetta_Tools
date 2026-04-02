@@ -70,14 +70,20 @@ def get_transformer_layers(model) -> list:
     RuntimeError
         If the layer structure cannot be detected automatically.
     """
-    # Common attribute paths for decoder-only transformer layers
+    # Common attribute paths for decoder-only transformer layers.
+    # Paths are tried in order.  "layers" must come after "model.layers"
+    # because some wrappers (CausalLM) have both, and "model.layers" is
+    # the correct one for those.  "layers" catches AutoModel-loaded
+    # Qwen/Llama/Gemma where there's no .model wrapper.
     candidates = [
         "transformer.h",         # GPT-2
-        "model.layers",          # Llama, Mistral, Gemma, Qwen
+        "model.layers",          # Llama, Mistral, Gemma, Qwen (CausalLM)
         "gpt_neox.layers",       # Pythia, GPT-NeoX
         "transformer.blocks",    # GPT-Neo (some variants)
         "model.decoder.layers",  # OPT
         "model.transformer.h",   # Some GPT-2 wrappers
+        "layers",                # Qwen, Llama, Gemma via AutoModel (no .model wrapper)
+        "decoder.layers",        # OPT via AutoModel
     ]
     for path in candidates:
         obj = model
