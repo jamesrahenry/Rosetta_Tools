@@ -245,6 +245,44 @@ def log_vram(label: str = "", device_index: int = 0) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive batch size
+# ---------------------------------------------------------------------------
+
+
+def safe_batch_size(requested: int, device: str = "cuda", reserve_gib: float = 2.0) -> int:
+    """Scale down batch size if VRAM is tight after model loading.
+
+    Heuristic: if free VRAM (minus a safety reserve) is less than 25% of
+    total, halve the batch size.  Repeat until batch_size=1 or there's room.
+
+    Returns the (possibly reduced) batch size.
+    """
+    if device != "cuda" or not torch.cuda.is_available():
+        return requested
+
+    stats = vram_stats()
+    if stats is None:
+        return requested
+
+    free = stats["free_gib"] - reserve_gib
+    total = stats["total_gib"]
+    batch = requested
+
+    while batch > 1 and free < 0.25 * total:
+        batch = max(1, batch // 2)
+        # After halving, the headroom estimate improves proportionally
+        # (rough: half the batch → half the activation memory)
+        free *= 2
+
+    if batch < requested:
+        log.warning(
+            "Reduced batch_size %d → %d (only %.1f GiB free of %.1f GiB)",
+            requested, batch, stats["free_gib"], total)
+
+    return batch
+
+
+# ---------------------------------------------------------------------------
 # Startup banner
 # ---------------------------------------------------------------------------
 
