@@ -7,10 +7,16 @@ Implements the three layer-wise metrics that characterize the CAZ:
   C(l)  Coherence   — explained variance of the primary PCA component
   v(l)  Velocity    — rate of change of separation (dS/dl, smoothed)
 
-And the boundary detection algorithm that identifies:
-  caz_start  — layer where velocity crosses the sustained threshold
-  caz_peak   — layer of maximum separation
-  caz_end    — layer where velocity turns consistently negative
+And two levels of boundary detection:
+
+  find_caz_boundary   — legacy single-peak detector (wraps the global max)
+  find_caz_regions    — multi-modal detector that finds ALL significant
+                        separation peaks and returns a CAZProfile describing
+                        the full shape of concept assembly
+
+The single-peak API is preserved for backward compatibility.  New analysis
+code should use ``find_caz_regions`` to avoid the assumption that each
+concept assembles at exactly one location.
 
 All functions operate on numpy arrays and have no dependency on any
 specific model library (HuggingFace, TransformerLens, etc.).  Feed in
@@ -24,7 +30,8 @@ Typical usage
         compute_coherence,
         compute_velocity,
         compute_layer_metrics,
-        find_caz_boundary,
+        find_caz_boundary,     # legacy single-peak
+        find_caz_regions,      # multi-modal shape detection
     )
 
     # activations_pos: [n_samples, hidden_dim] for positive class at one layer
@@ -35,16 +42,26 @@ Typical usage
     # For a full model run:
     # layer_acts: list of (pos_acts, neg_acts) tuples, one per layer
     metrics = compute_layer_metrics(layer_acts)
+
+    # Legacy (single peak):
     boundary = find_caz_boundary(metrics)
+
+    # Full shape (multi-modal):
+    profile = find_caz_regions(metrics)
+    print(f"{profile.n_regions} assembly regions, dominant at L{profile.dominant.peak}")
+    for region in profile.regions:
+        print(f"  L{region.start}–L{region.end}: peak S={region.peak_separation:.3f}")
 """
 
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray, ArrayLike
+from scipy.signal import find_peaks
 from sklearn.decomposition import PCA
 
 
@@ -402,3 +419,205 @@ def compute_caz_statistics(
         "post_caz": _region(post),
     }
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Multi-modal CAZ detection
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CAZRegion:
+    """A single assembly region within the S(l) curve.
+
+    One concept may have multiple regions (e.g. a shallow lexical peak
+    and a deep compositional peak).  Each region has its own boundaries,
+    peak, and summary statistics.
+    """
+
+    start: int                     # first layer of this region
+    peak: int                      # layer of maximum separation within region
+    end: int                       # last layer of this region
+    width: int                     # end - start + 1
+    peak_separation: float         # S(l) at peak
+    peak_coherence: float          # C(l) at peak
+    mean_separation: float         # mean S(l) across region
+    mean_coherence: float          # mean C(l) across region
+    prominence: float              # scipy peak prominence (height above saddle)
+    depth_pct: float               # peak as % of model depth
+    width_pct: float               # width as % of model depth
+
+    # Asymmetry within this region
+    rise_span: int                 # layers from start to peak
+    fall_span: int                 # layers from peak to end
+
+
+@dataclass
+class CAZProfile:
+    """Full shape description of concept assembly across all layers.
+
+    Replaces the single-peak CAZBoundary with a multi-region view.
+    The ``dominant`` property points to the tallest region, preserving
+    backward compatibility with code that expects a single peak.
+    """
+
+    n_layers: int
+    regions: list[CAZRegion]
+    n_regions: int
+
+    # Global shape descriptors
+    global_peak_layer: int         # layer of absolute max S(l)
+    global_peak_separation: float  # S at that layer
+    global_mean_separation: float  # mean S(l) across all layers
+    is_multimodal: bool            # True if 2+ significant regions
+
+    @property
+    def dominant(self) -> CAZRegion:
+        """The region with the highest peak separation."""
+        return max(self.regions, key=lambda r: r.peak_separation)
+
+    @property
+    def secondary(self) -> CAZRegion | None:
+        """Second-tallest region, or None if unimodal."""
+        if len(self.regions) < 2:
+            return None
+        sorted_r = sorted(self.regions, key=lambda r: r.peak_separation, reverse=True)
+        return sorted_r[1]
+
+    def to_legacy_boundary(self) -> CAZBoundary:
+        """Convert the dominant region to a legacy CAZBoundary for compat."""
+        d = self.dominant
+        return CAZBoundary(
+            caz_start=d.start,
+            caz_peak=d.peak,
+            caz_end=d.end,
+            caz_width=d.width,
+            peak_separation=d.peak_separation,
+            threshold=0.0,
+        )
+
+
+def find_caz_regions(
+    metrics: list[LayerMetrics],
+    min_prominence_frac: float = 0.10,
+    min_peak_distance: int = 2,
+) -> CAZProfile:
+    """Detect all significant assembly regions in the S(l) curve.
+
+    Unlike ``find_caz_boundary`` which assumes a single contiguous CAZ,
+    this function finds every significant separation peak and draws
+    boundaries around each one using the saddle points (local minima)
+    between peaks.
+
+    Region boundaries
+    -----------------
+    For multi-modal curves, each region extends from one saddle point to
+    the next.  The first region starts at layer 0; the last ends at the
+    final layer.  This avoids the problem of threshold-based boundaries
+    failing when S(l) never drops below the threshold (as happens with
+    concepts like credibility where separation stays high everywhere).
+
+    For unimodal curves (single peak), the region spans the full model.
+    Use the velocity-based ``find_caz_boundary`` for tighter single-peak
+    boundaries when that's what you need.
+
+    Parameters
+    ----------
+    metrics:
+        Output of ``compute_layer_metrics()``.
+    min_prominence_frac:
+        Minimum peak prominence as a fraction of the global max separation.
+        Peaks below this threshold are treated as noise.  Default 0.10
+        (10% of max separation).
+    min_peak_distance:
+        Minimum distance (in layers) between adjacent peaks.
+        Prevents detecting noise ripples as separate regions.
+
+    Returns
+    -------
+    CAZProfile
+        Full shape description with all detected regions.
+    """
+    if not metrics:
+        raise ValueError("metrics list is empty")
+
+    seps = np.array([m.separation for m in metrics], dtype=np.float64)
+    cohs = np.array([m.coherence for m in metrics], dtype=np.float64)
+    n_layers = len(metrics)
+
+    global_peak = int(np.argmax(seps))
+    global_peak_sep = float(seps[global_peak])
+    global_mean_sep = float(seps.mean())
+
+    # Find all significant peaks
+    min_prominence = min_prominence_frac * global_peak_sep
+    peak_indices, properties = find_peaks(
+        seps,
+        prominence=max(min_prominence, 1e-6),
+        distance=min_peak_distance,
+    )
+
+    # If find_peaks returns nothing (monotonic or flat), use the global max
+    if len(peak_indices) == 0:
+        peak_indices = np.array([global_peak])
+        properties = {"prominences": np.array([global_peak_sep])}
+
+    # Sort peaks by layer index
+    sort_order = np.argsort(peak_indices)
+    peak_indices = peak_indices[sort_order]
+    prominences = properties["prominences"][sort_order]
+
+    # Find saddle points (local minima between consecutive peaks)
+    # to use as region boundaries
+    saddles = []
+    for i in range(len(peak_indices) - 1):
+        segment = seps[peak_indices[i]:peak_indices[i + 1] + 1]
+        saddle_offset = int(np.argmin(segment))
+        saddle_layer = peak_indices[i] + saddle_offset
+        saddles.append(saddle_layer)
+
+    # Build regions: each region extends from one saddle to the next
+    # First region starts at layer 0, last region ends at final layer
+    region_starts = [0] + [s + 1 for s in saddles]
+    region_ends = [s for s in saddles] + [n_layers - 1]
+
+    regions = []
+    for i, pk_idx in enumerate(peak_indices):
+        pk_sep = float(seps[pk_idx])
+        pk_coh = float(cohs[pk_idx])
+        prominence = float(prominences[i])
+
+        start = region_starts[i]
+        end = region_ends[i]
+        width = end - start + 1
+        rise_span = max(pk_idx - start, 1)
+        fall_span = max(end - pk_idx, 1)
+
+        region_seps = seps[start:end + 1]
+        region_cohs = cohs[start:end + 1]
+
+        regions.append(CAZRegion(
+            start=start,
+            peak=pk_idx,
+            end=end,
+            width=width,
+            peak_separation=pk_sep,
+            peak_coherence=pk_coh,
+            mean_separation=float(region_seps.mean()),
+            mean_coherence=float(region_cohs.mean()),
+            prominence=prominence,
+            depth_pct=100.0 * pk_idx / n_layers if n_layers > 0 else 0.0,
+            width_pct=100.0 * width / n_layers if n_layers > 0 else 0.0,
+            rise_span=rise_span,
+            fall_span=fall_span,
+        ))
+
+    return CAZProfile(
+        n_layers=n_layers,
+        regions=regions,
+        n_regions=len(regions),
+        global_peak_layer=global_peak,
+        global_peak_separation=global_peak_sep,
+        global_mean_separation=global_mean_sep,
+        is_multimodal=len(regions) >= 2,
+    )
