@@ -287,6 +287,85 @@ def load_region_df(
     ).reset_index(drop=True)
 
 
+def load_scored_region_df(
+    layer_df: pd.DataFrame,
+    min_prominence_frac: float = 0.005,
+) -> pd.DataFrame:
+    """Compute per-region structural summary using the scored CAZ detector.
+
+    Like ``load_region_df`` but uses ``find_caz_regions_scored`` with a low
+    prominence floor (default 0.5%) to catch gentle CAZes.  Includes
+    ``caz_score`` in output for downstream filtering/ranking.
+
+    Parameters
+    ----------
+    layer_df:
+        Tidy DataFrame from ``load_results_dir`` or ``load_result_df``.
+    min_prominence_frac:
+        Passed to ``find_caz_regions_scored``.  Default 0.005 (0.5%).
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per region.  Columns include all of ``load_region_df`` plus
+        ``caz_score`` (composite strength metric).
+    """
+    from rosetta_tools.caz import find_caz_regions_scored, LayerMetrics
+
+    rows = []
+    for (model_id, concept), sub in layer_df.groupby(["model_id", "concept"]):
+        sub = sub.sort_values("layer")
+        metrics = [
+            LayerMetrics(
+                layer=int(r["layer"]),
+                separation=r["separation"],
+                coherence=r["coherence"],
+                velocity=r["velocity"],
+            )
+            for _, r in sub.iterrows()
+        ]
+        try:
+            profile = find_caz_regions_scored(
+                metrics, min_prominence_frac=min_prominence_frac,
+            )
+        except Exception:
+            continue
+
+        dominant_peak = profile.dominant.peak
+        for i, region in enumerate(profile.regions):
+            rows.append({
+                "model_id": model_id,
+                "concept": concept,
+                "n_layers": profile.n_layers,
+                "is_multimodal": profile.is_multimodal,
+                "n_regions": profile.n_regions,
+                "region_idx": i,
+                "is_dominant": region.peak == dominant_peak,
+                "start": region.start,
+                "peak": region.peak,
+                "end": region.end,
+                "width": region.width,
+                "width_pct": region.width_pct,
+                "depth_pct": region.depth_pct,
+                "peak_separation": region.peak_separation,
+                "peak_coherence": region.peak_coherence,
+                "mean_separation": region.mean_separation,
+                "mean_coherence": region.mean_coherence,
+                "prominence": region.prominence,
+                "rise_span": region.rise_span,
+                "fall_span": region.fall_span,
+                "caz_score": region.caz_score,
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    return df.sort_values(
+        ["model_id", "concept", "region_idx"]
+    ).reset_index(drop=True)
+
+
 def load_run_summary(path: str | Path) -> pd.DataFrame:
     """Load a run_summary.json index as a wide-form summary DataFrame.
 
