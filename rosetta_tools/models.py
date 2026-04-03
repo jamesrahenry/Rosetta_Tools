@@ -22,6 +22,7 @@ class ModelEntry:
     vram_gb: float  # approximate bf16 VRAM usage
     enabled: bool = True  # False = excluded from --all runs (e.g. OOM)
     gated: bool = False  # requires HF license acceptance
+    tags: list[str] = field(default_factory=list)  # e.g. ["instruct", "rlhf"]
     quirks: list[str] = field(default_factory=list)  # known issues/notes
 
 
@@ -68,10 +69,10 @@ REGISTRY: list[ModelEntry] = [
                quirks=["OOM on L4 (22 GiB) — needs H200 or 8-bit"]),
 
     # Llama 3.2 — Meta, RoPE, GQA
-    ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, gated=True,
-               quirks=["Gated: requires Meta license acceptance on HuggingFace"]),
-    ModelEntry("meta-llama/Llama-3.2-3B", "llama3", 6.4, gated=True,
-               quirks=["Gated: requires Meta license acceptance on HuggingFace"]),
+    ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, gated=True, enabled=False,
+               quirks=["Gated: pending Meta license approval"]),
+    ModelEntry("meta-llama/Llama-3.2-3B", "llama3", 6.4, gated=True, enabled=False,
+               quirks=["Gated: pending Meta license approval"]),
 
     # Mistral — Mistral AI, RoPE, sliding window attention, GQA
     ModelEntry("mistralai/Ministral-8B-Instruct-2410", "mistral", 16.0, enabled=False,
@@ -83,6 +84,43 @@ REGISTRY: list[ModelEntry] = [
     # Phi — Microsoft, "textbook" training data, MHA
     ModelEntry("microsoft/phi-2", "phi", 5.6,
                quirks=["Unusual training mix (synthetic textbooks) — may affect geometry"]),
+
+    # ── Instruct variants (RLHF / alignment-tuned) ──
+    # Same weights + architecture as base, with RLHF/DPO fine-tuning.
+    # For RLHF feature destruction audit: diff feature maps base vs instruct.
+
+    # ── Instruct variants (RLHF / alignment-tuned) ──
+    # Disabled by default — not included in --all runs.
+    # Use models_by_tag("instruct") or instruct_pairs() to query.
+
+    # Qwen 2.5 Instruct
+    ModelEntry("Qwen/Qwen2.5-0.5B-Instruct", "qwen2-instruct", 1.0,
+               enabled=False, tags=["instruct"]),
+    ModelEntry("Qwen/Qwen2.5-1.5B-Instruct", "qwen2-instruct", 3.1,
+               enabled=False, tags=["instruct"]),
+    ModelEntry("Qwen/Qwen2.5-3B-Instruct",   "qwen2-instruct", 6.2,
+               enabled=False, tags=["instruct"]),
+    ModelEntry("Qwen/Qwen2.5-7B-Instruct",   "qwen2-instruct", 14.5,
+               enabled=False, tags=["instruct"]),
+
+    # Gemma 2 IT (instruction-tuned)
+    ModelEntry("google/gemma-2-2b-it", "gemma2-instruct", 5.1,
+               enabled=False, tags=["instruct"]),
+    ModelEntry("google/gemma-2-9b-it", "gemma2-instruct", 18.5,
+               enabled=False, tags=["instruct"],
+               quirks=["OOM on L4 — same as base gemma-2-9b"]),
+
+    # Llama 3.2 Instruct
+    ModelEntry("meta-llama/Llama-3.2-1B-Instruct", "llama3-instruct", 2.4,
+               enabled=False, gated=True, tags=["instruct"],
+               quirks=["Gated: requires Meta license acceptance on HuggingFace"]),
+    ModelEntry("meta-llama/Llama-3.2-3B-Instruct", "llama3-instruct", 6.4,
+               enabled=False, gated=True, tags=["instruct"],
+               quirks=["Gated: requires Meta license acceptance on HuggingFace"]),
+
+    # Mistral Instruct
+    ModelEntry("mistralai/Mistral-7B-Instruct-v0.3", "mistral-instruct", 14.5,
+               enabled=False, tags=["instruct"]),
 ]
 
 
@@ -150,12 +188,45 @@ def family_of(model_id: str) -> str:
     return "unknown"
 
 
+def models_by_tag(tag: str) -> list[str]:
+    """Return model IDs that have a given tag (ignores enabled flag)."""
+    return [m.model_id for m in REGISTRY if tag in m.tags]
+
+
 def get_model(model_id: str) -> ModelEntry | None:
     """Look up a model entry by ID."""
     for m in REGISTRY:
         if m.model_id == model_id:
             return m
     return None
+
+
+def instruct_pairs(include_disabled: bool = False) -> list[tuple[str, str]]:
+    """Return (base_model_id, instruct_model_id) pairs.
+
+    Matches families by name: 'foo' pairs with 'foo-instruct'.
+    Only returns pairs where both base and instruct are enabled
+    (or all if include_disabled).
+    """
+    base_by_family: dict[str, list[ModelEntry]] = {}
+    inst_by_family: dict[str, list[ModelEntry]] = {}
+    for m in REGISTRY:
+        if not include_disabled and not m.enabled:
+            continue
+        if m.family.endswith("-instruct"):
+            inst_by_family.setdefault(m.family.removesuffix("-instruct"), []).append(m)
+        else:
+            base_by_family.setdefault(m.family, []).append(m)
+
+    pairs = []
+    for fam, bases in base_by_family.items():
+        instructs = inst_by_family.get(fam, [])
+        # Match by VRAM (same size = same model, different tuning)
+        inst_by_vram = {m.vram_gb: m for m in instructs}
+        for b in bases:
+            if b.vram_gb in inst_by_vram:
+                pairs.append((b.model_id, inst_by_vram[b.vram_gb].model_id))
+    return pairs
 
 
 # ---------------------------------------------------------------------------
