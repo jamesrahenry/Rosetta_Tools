@@ -76,14 +76,15 @@ def get_transformer_layers(model) -> list:
     # the correct one for those.  "layers" catches AutoModel-loaded
     # Qwen/Llama/Gemma where there's no .model wrapper.
     candidates = [
-        "transformer.h",         # GPT-2
+        "transformer.h",         # GPT-2 (CausalLM wrapper)
         "model.layers",          # Llama, Mistral, Gemma, Qwen (CausalLM)
         "gpt_neox.layers",       # Pythia, GPT-NeoX
         "transformer.blocks",    # GPT-Neo (some variants)
-        "model.decoder.layers",  # OPT
+        "model.decoder.layers",  # OPT (CausalLM)
         "model.transformer.h",   # Some GPT-2 wrappers
         "layers",                # Qwen, Llama, Gemma via AutoModel (no .model wrapper)
         "decoder.layers",        # OPT via AutoModel
+        "h",                     # GPT-2 via AutoModel (base GPT2Model)
     ]
     for path in candidates:
         obj = model
