@@ -58,6 +58,9 @@ class Feature:
     concept_alignment: dict[str, float] = field(default_factory=dict)
     # concept → max cos² across all layers of this feature's life
 
+    concept_alignment_trajectory: dict[str, dict[int, float]] = field(default_factory=dict)
+    # concept → {layer_index: cos²} for every layer this feature lives in
+
     @property
     def is_transient(self) -> bool:
         """True if feature lives for only 1-2 layers."""
@@ -284,6 +287,8 @@ def track_features(
         # Flat mode (legacy): check direction at peak layer only.
         concept_align: dict[str, float] = {}
 
+        concept_align_traj: dict[str, dict[int, float]] = {}
+
         if _per_layer:
             # ── Layer-aware alignment ──
             for pos_in_track, (layer_i, pc_i) in enumerate(
@@ -302,6 +307,11 @@ def track_features(
                     if feat_unit.shape[0] != c_unit.shape[0]:
                         continue
                     cos_sq = float(np.dot(feat_unit, c_unit)) ** 2
+                    # Store per-layer trajectory
+                    if c_name not in concept_align_traj:
+                        concept_align_traj[c_name] = {}
+                    concept_align_traj[c_name][layer_i] = round(cos_sq, 4)
+                    # Keep max for backward compat
                     if cos_sq > concept_align.get(c_name, 0.0):
                         concept_align[c_name] = round(cos_sq, 4)
         else:
@@ -320,6 +330,9 @@ def track_features(
                         continue
                     cos_sq = float(np.dot(peak_unit, c_unit)) ** 2
                     concept_align[c_name] = round(cos_sq, 4)
+                    if c_name not in concept_align_traj:
+                        concept_align_traj[c_name] = {}
+                    concept_align_traj[c_name][peak_layer_actual] = round(cos_sq, 4)
 
         f = Feature(
             feature_id=track["id"],
@@ -335,6 +348,7 @@ def track_features(
             peak_depth_pct=round(100 * layers[peak_idx] / n_layers_total, 1),
             mean_eigenvalue=round(float(np.mean(eigs)), 4),
             concept_alignment=concept_align,
+            concept_alignment_trajectory=concept_align_traj,
         )
         features.append(f)
 
