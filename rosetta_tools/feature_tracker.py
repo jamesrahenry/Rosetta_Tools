@@ -105,7 +105,7 @@ def track_features(
     n_layers_total: int,
     cos_threshold: float = 0.5,
     min_eigenvalue_frac: float = 0.01,
-    concept_directions: dict[str, NDArray] | None = None,
+    concept_directions: dict[str, NDArray] | dict[str, dict[int, NDArray]] | None = None,
     model_id: str = "",
 ) -> FeatureMap:
     """Track features across layers.
@@ -128,6 +128,10 @@ def track_features(
         a PC worth tracking.  Filters noise PCs.
     concept_directions:
         Optional dict of known concept directions for alignment.
+        Two formats accepted:
+          - ``dict[str, NDArray]``: one direction per concept (flat, legacy).
+          - ``dict[str, dict[int, NDArray]]``: per-layer directions,
+            keyed ``concept_directions[name][layer_index] = direction``.
     model_id:
         Model identifier for the result.
 
@@ -139,12 +143,28 @@ def track_features(
     n_layers = len(layer_directions)
     concept_dirs = concept_directions or {}
 
+    # Detect per-layer format: values are dicts (layer -> direction)
+    _per_layer = False
+    if concept_dirs:
+        _first_val = next(iter(concept_dirs.values()))
+        _per_layer = isinstance(_first_val, dict)
+
     # Normalize concept directions
-    concept_units = {}
-    for name, vec in concept_dirs.items():
-        norm = np.linalg.norm(vec)
-        if norm > 1e-12:
-            concept_units[name] = vec / norm
+    concept_units: dict[str, NDArray | dict[int, NDArray]] = {}
+    if _per_layer:
+        for name, layer_dict in concept_dirs.items():  # type: ignore[union-attr]
+            normed: dict[int, NDArray] = {}
+            for layer_key, vec in layer_dict.items():
+                n = np.linalg.norm(vec)
+                if n > 1e-12:
+                    normed[layer_key] = vec / n
+            if normed:
+                concept_units[name] = normed
+    else:
+        for name, vec in concept_dirs.items():
+            norm = np.linalg.norm(vec)
+            if norm > 1e-12:
+                concept_units[name] = vec / norm
 
     # ── Build active PCs per layer ──
     # Filter to PCs above min eigenvalue threshold
@@ -259,26 +279,47 @@ def track_features(
         death = layers[-1]
         lifespan = death - birth + 1
 
-        # Concept alignment: check direction at peak layer against known concepts
-        peak_direction = None
-        # Get the direction at the peak
-        peak_layer_pos = layers.index(layers[peak_idx]) if peak_idx < len(layers) else 0
-        for layer_idx_check in range(n_layers):
-            if layer_idx_check == layers[peak_idx]:
-                pc_target = track["pc_indices"][peak_idx]
-                dirs_at_layer = layer_directions[layer_idx_check]
-                if pc_target < len(dirs_at_layer):
-                    peak_direction = dirs_at_layer[pc_target]
-                break
+        # Concept alignment: check direction against known concepts.
+        # Per-layer mode: check every layer the feature lives in, take max cos².
+        # Flat mode (legacy): check direction at peak layer only.
+        concept_align: dict[str, float] = {}
 
-        concept_align = {}
-        if peak_direction is not None:
-            peak_unit = peak_direction / (np.linalg.norm(peak_direction) + 1e-12)
-            for c_name, c_unit in concept_units.items():
-                if peak_unit.shape[0] != c_unit.shape[0]:
-                    continue  # skip: dimension mismatch (e.g. embedding proj layer)
-                cos_sq = float(np.dot(peak_unit, c_unit)) ** 2
-                concept_align[c_name] = round(cos_sq, 4)
+        if _per_layer:
+            # ── Layer-aware alignment ──
+            for pos_in_track, (layer_i, pc_i) in enumerate(
+                zip(layers, track["pc_indices"])
+            ):
+                dirs_at_layer = layer_directions[layer_i]
+                if pc_i >= len(dirs_at_layer):
+                    continue
+                feat_dir = dirs_at_layer[pc_i]
+                feat_unit = feat_dir / (np.linalg.norm(feat_dir) + 1e-12)
+
+                for c_name, c_layer_dict in concept_units.items():
+                    c_unit = c_layer_dict.get(layer_i)  # type: ignore[union-attr]
+                    if c_unit is None:
+                        continue
+                    if feat_unit.shape[0] != c_unit.shape[0]:
+                        continue
+                    cos_sq = float(np.dot(feat_unit, c_unit)) ** 2
+                    if cos_sq > concept_align.get(c_name, 0.0):
+                        concept_align[c_name] = round(cos_sq, 4)
+        else:
+            # ── Legacy flat alignment (peak layer only) ──
+            peak_direction = None
+            peak_layer_actual = layers[peak_idx]
+            pc_target = track["pc_indices"][peak_idx]
+            dirs_at_layer = layer_directions[peak_layer_actual]
+            if pc_target < len(dirs_at_layer):
+                peak_direction = dirs_at_layer[pc_target]
+
+            if peak_direction is not None:
+                peak_unit = peak_direction / (np.linalg.norm(peak_direction) + 1e-12)
+                for c_name, c_unit in concept_units.items():
+                    if peak_unit.shape[0] != c_unit.shape[0]:
+                        continue
+                    cos_sq = float(np.dot(peak_unit, c_unit)) ** 2
+                    concept_align[c_name] = round(cos_sq, 4)
 
         f = Feature(
             feature_id=track["id"],
