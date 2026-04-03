@@ -182,37 +182,44 @@ def track_features(
             track_dirs = np.array([t["direction"] for t in open_tracks])
             pc_dirs = np.array([pc[1] for pc in layer_pcs])
 
-            # Cosine similarity: |cos| because direction sign is arbitrary in PCA
-            cos_matrix = np.abs(track_dirs @ pc_dirs.T)  # [n_tracks, n_pcs]
+            # Dimension change (e.g. OPT embedding proj != hidden_size):
+            # can't cosine-match across different spaces, close all tracks
+            if track_dirs.shape[1] != pc_dirs.shape[1]:
+                finished_tracks.extend(open_tracks)
+                open_tracks = []
+                # Fall through to birth new tracks below
+            else:
+                # Cosine similarity: |cos| because direction sign is arbitrary in PCA
+                cos_matrix = np.abs(track_dirs @ pc_dirs.T)  # [n_tracks, n_pcs]
 
-            # Greedy matching: best pairs first
-            while True:
-                if cos_matrix.size == 0:
-                    break
-                best_idx = np.unravel_index(np.argmax(cos_matrix), cos_matrix.shape)
-                best_cos = cos_matrix[best_idx]
+                # Greedy matching: best pairs first
+                while True:
+                    if cos_matrix.size == 0:
+                        break
+                    best_idx = np.unravel_index(np.argmax(cos_matrix), cos_matrix.shape)
+                    best_cos = cos_matrix[best_idx]
 
-                if best_cos < cos_threshold:
-                    break
+                    if best_cos < cos_threshold:
+                        break
 
-                track_idx, pc_idx = best_idx
-                if track_idx in matched_tracks or pc_idx in matched_pcs:
-                    cos_matrix[best_idx] = -1
-                    continue
+                    track_idx, pc_idx = best_idx
+                    if track_idx in matched_tracks or pc_idx in matched_pcs:
+                        cos_matrix[best_idx] = -1
+                        continue
 
-                # Match: extend the track
-                track = open_tracks[track_idx]
-                pc = layer_pcs[pc_idx]
-                track["layers"].append(layer_idx)
-                track["pc_indices"].append(pc[0])
-                track["eigenvalues"].append(pc[2])
-                track["cos_chain"].append(float(best_cos))
-                track["direction"] = pc[1]  # update to current direction
+                    # Match: extend the track
+                    track = open_tracks[track_idx]
+                    pc = layer_pcs[pc_idx]
+                    track["layers"].append(layer_idx)
+                    track["pc_indices"].append(pc[0])
+                    track["eigenvalues"].append(pc[2])
+                    track["cos_chain"].append(float(best_cos))
+                    track["direction"] = pc[1]  # update to current direction
 
-                matched_tracks.add(track_idx)
-                matched_pcs.add(pc_idx)
-                cos_matrix[track_idx, :] = -1
-                cos_matrix[:, pc_idx] = -1
+                    matched_tracks.add(track_idx)
+                    matched_pcs.add(pc_idx)
+                    cos_matrix[track_idx, :] = -1
+                    cos_matrix[:, pc_idx] = -1
 
         # Close unmatched tracks
         new_open = []
