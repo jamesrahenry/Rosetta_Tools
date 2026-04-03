@@ -217,7 +217,7 @@ from rosetta_tools.models import (
 |---|---|---|
 | `all_models` | `(include_disabled=False) -> list[str]` | All enabled model IDs (base models only by default) |
 | `models_by_family` | `(family) -> list[str]` | Enabled models for one family (e.g., `"pythia"`) |
-| `models_by_tag` | `(tag) -> list[str]` | Models with a given tag, ignores enabled flag |
+| `models_by_tag` | `(tag, include_disabled=False) -> list[str]` | Models with a given tag (respects enabled flag) |
 | `families` | `() -> dict[str, list[str]]` | `{family: [model_ids]}` for enabled models |
 | `family_of` | `(model_id) -> str` | Family name for a model (`"unknown"` if not found) |
 | `vram_gb` | `(model_id) -> float` | Approximate bf16 VRAM in GB (`0.0` if not found) |
@@ -234,7 +234,7 @@ from rosetta_tools.models import (
 
 **Model families:** pythia, gpt2, opt, qwen2, gemma2, llama3, mistral, phi, plus `-instruct` variants.
 
-**Instruct models** are tagged `"instruct"` and disabled by default — they don't appear in `all_models()` or `families()`. Query them with `models_by_tag("instruct")` or `instruct_pairs()`.
+**Instruct models** are tagged `"instruct"` and disabled by default — they don't appear in `all_models()`, `families()`, or `models_by_tag()`. Query disabled ones explicitly with `models_by_tag("instruct", include_disabled=True)` or `instruct_pairs(include_disabled=True)`.
 
 ---
 

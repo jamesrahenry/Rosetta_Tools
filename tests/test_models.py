@@ -145,7 +145,7 @@ class TestModelsByFamily:
 class TestModelsByTag:
 
     def test_instruct_tag(self):
-        result = models_by_tag("instruct")
+        result = models_by_tag("instruct", include_disabled=True)
         assert len(result) > 0
         for mid in result:
             entry = get_model(mid)
@@ -154,13 +154,14 @@ class TestModelsByTag:
     def test_unknown_tag_returns_empty(self):
         assert models_by_tag("nonexistent_tag_xyz") == []
 
-    def test_ignores_enabled_flag(self):
-        """models_by_tag returns disabled models too."""
-        instruct = models_by_tag("instruct")
-        for mid in instruct:
+    def test_respects_enabled_flag(self):
+        """models_by_tag excludes disabled models by default."""
+        all_instruct = models_by_tag("instruct", include_disabled=True)
+        enabled_only = models_by_tag("instruct")
+        for mid in enabled_only:
             entry = get_model(mid)
-            # They should all be disabled, but the function still returns them
-            assert entry is not None
+            assert entry.enabled
+        assert len(all_instruct) >= len(enabled_only)
 
 
 # ---------------------------------------------------------------------------

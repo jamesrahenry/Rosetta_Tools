@@ -188,9 +188,10 @@ def family_of(model_id: str) -> str:
     return "unknown"
 
 
-def models_by_tag(tag: str) -> list[str]:
-    """Return model IDs that have a given tag (ignores enabled flag)."""
-    return [m.model_id for m in REGISTRY if tag in m.tags]
+def models_by_tag(tag: str, include_disabled: bool = False) -> list[str]:
+    """Return model IDs that have a given tag."""
+    return [m.model_id for m in REGISTRY
+            if tag in m.tags and (include_disabled or m.enabled)]
 
 
 def get_model(model_id: str) -> ModelEntry | None:
