@@ -275,6 +275,8 @@ def track_features(
         if peak_direction is not None:
             peak_unit = peak_direction / (np.linalg.norm(peak_direction) + 1e-12)
             for c_name, c_unit in concept_units.items():
+                if peak_unit.shape[0] != c_unit.shape[0]:
+                    continue  # skip: dimension mismatch (e.g. embedding proj layer)
                 cos_sq = float(np.dot(peak_unit, c_unit)) ** 2
                 concept_align[c_name] = round(cos_sq, 4)
 
