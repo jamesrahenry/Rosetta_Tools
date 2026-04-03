@@ -69,10 +69,8 @@ REGISTRY: list[ModelEntry] = [
                quirks=["OOM on L4 (22 GiB) — needs H200 or 8-bit"]),
 
     # Llama 3.2 — Meta, RoPE, GQA
-    ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, gated=True, enabled=False,
-               quirks=["Gated: pending Meta license approval"]),
-    ModelEntry("meta-llama/Llama-3.2-3B", "llama3", 6.4, gated=True, enabled=False,
-               quirks=["Gated: pending Meta license approval"]),
+    ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, gated=True),
+    ModelEntry("meta-llama/Llama-3.2-3B", "llama3", 6.4, gated=True),
 
     # Mistral — Mistral AI, RoPE, sliding window attention, GQA
     ModelEntry("mistralai/Ministral-8B-Instruct-2410", "mistral", 16.0, enabled=False,
@@ -112,11 +110,9 @@ REGISTRY: list[ModelEntry] = [
 
     # Llama 3.2 Instruct
     ModelEntry("meta-llama/Llama-3.2-1B-Instruct", "llama3-instruct", 2.4,
-               enabled=False, gated=True, tags=["instruct"],
-               quirks=["Gated: requires Meta license acceptance on HuggingFace"]),
+               gated=True, tags=["instruct"]),
     ModelEntry("meta-llama/Llama-3.2-3B-Instruct", "llama3-instruct", 6.4,
-               enabled=False, gated=True, tags=["instruct"],
-               quirks=["Gated: requires Meta license acceptance on HuggingFace"]),
+               gated=True, tags=["instruct"]),
 
     # Mistral Instruct
     ModelEntry("mistralai/Mistral-7B-Instruct-v0.3", "mistral-instruct", 14.5,
