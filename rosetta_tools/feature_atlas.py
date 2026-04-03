@@ -273,18 +273,18 @@ def _load_calibration_acts(convergence_root: Path, model_id: str) -> NDArray | N
     """Load calibration activations from semantic_convergence, stack all concepts."""
     slug = model_id.replace("/", "_").replace("-", "_")
     # Find matching xarch directory
-    for d in sorted(convergence_root.glob(f"xarch_{slug}*"), reverse=True):
-        cal_files = sorted(d.glob("calibration_*.npy"))
-        if cal_files:
-            arrays = [np.load(f) for f in cal_files]
-            return np.concatenate(arrays, axis=0)
-    # Try with just the model name after /
-    short = model_id.split("/")[-1].replace("-", "_")
-    for d in sorted(convergence_root.glob(f"xarch_{short}*"), reverse=True):
-        cal_files = sorted(d.glob("calibration_*.npy"))
-        if cal_files:
-            arrays = [np.load(f) for f in cal_files]
-            return np.concatenate(arrays, axis=0)
+    for pattern in [f"xarch_{slug}*", f"xarch_{model_id.split('/')[-1].replace('-', '_')}*"]:
+        for d in sorted(convergence_root.glob(pattern), reverse=True):
+            cal_files = sorted(d.glob("calibration_*.npy"))
+            if cal_files:
+                arrays = []
+                for f in cal_files:
+                    arr = np.load(f)
+                    # Some files are 3D [n, seq, hidden] — pool to 2D [n, hidden]
+                    if arr.ndim == 3:
+                        arr = arr.mean(axis=1)
+                    arrays.append(arr)
+                return np.concatenate(arrays, axis=0)
     return None
 
 
