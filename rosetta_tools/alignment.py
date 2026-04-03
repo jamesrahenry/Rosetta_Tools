@@ -87,6 +87,11 @@ def compute_procrustes_rotation(
     source = np.asarray(source_acts, dtype=np.float64)
     target = np.asarray(target_acts, dtype=np.float64)
 
+    # Truncate to shared texts when tokenization drops differ across models
+    n = min(source.shape[0], target.shape[0])
+    source = source[:n]
+    target = target[:n]
+
     source -= source.mean(axis=0)
     target -= target.mean(axis=0)
 
