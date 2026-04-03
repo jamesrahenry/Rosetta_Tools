@@ -333,9 +333,19 @@ def release_model(model, *, clear_cache: bool = True) -> None:
         returning pooled memory to the CUDA allocator.  Set to False only
         if loading a replacement model immediately.
     """
+    # Move all parameters to CPU before deletion to free CUDA tensors
+    try:
+        model.cpu()
+    except Exception:
+        pass
     del model
     gc.collect()
     if clear_cache and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        # Reset memory stats to avoid stale peak tracking
+        torch.cuda.reset_peak_memory_stats()
+        # Second gc pass — catches reference cycles broken by first pass
+        gc.collect()
         torch.cuda.empty_cache()
 
 
