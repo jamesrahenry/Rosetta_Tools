@@ -110,9 +110,9 @@ REGISTRY: list[ModelEntry] = [
 
     # Llama 3.2 Instruct
     ModelEntry("meta-llama/Llama-3.2-1B-Instruct", "llama3-instruct", 2.4,
-               gated=True, tags=["instruct"]),
+               enabled=False, gated=True, tags=["instruct"]),
     ModelEntry("meta-llama/Llama-3.2-3B-Instruct", "llama3-instruct", 6.4,
-               gated=True, tags=["instruct"]),
+               enabled=False, gated=True, tags=["instruct"]),
 
     # Mistral Instruct
     ModelEntry("mistralai/Mistral-7B-Instruct-v0.3", "mistral-instruct", 14.5,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rosetta_tools"
-version = "0.1.0"
+version = "1.0.0"
 description = "Shared tooling for the Rosetta interpretability research program"
 authors = [{name = "James Henry", email = "jamesrahenry@henrynet.ca"}]
 license = {text = "MIT"}
