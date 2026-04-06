@@ -74,9 +74,11 @@ REGISTRY: list[ModelEntry] = [
     ModelEntry("Qwen/Qwen2.5-7B",    "qwen2", 14.5, encoding_strategy="sparse"),
 
     # Gemma 2 — Google, RoPE, GQA, sliding window + global attention alternating
-    ModelEntry("google/gemma-2-2b",  "gemma2", 5.1,  encoding_strategy="sparse"),
+    ModelEntry("google/gemma-2-2b",  "gemma2", 5.1,  encoding_strategy="sparse",
+               quirks=["Extreme sparse encoder — alternating local/global attn produces layer-local features; cos-threshold has no effect on feature count"]),
     ModelEntry("google/gemma-2-9b",  "gemma2", 18.5, encoding_strategy="sparse", enabled=False,
-               quirks=["OOM in bfloat16 on L4 — use --load-in-8bit (~11 GiB)"]),
+               quirks=["OOM in bfloat16 on L4 — use --load-in-8bit (~11 GiB)",
+                       "Extreme sparse encoder — cos-threshold has no effect on feature count"]),
 
     # Llama 3.2 — Meta, RoPE, GQA, SwiGLU
     ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, encoding_strategy="sparse", gated=True),
