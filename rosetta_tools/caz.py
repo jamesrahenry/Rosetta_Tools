@@ -191,9 +191,20 @@ def compute_coherence(
     return ratio if np.isfinite(ratio) else 0.0
 
 
+def _auto_velocity_window(n_layers: int) -> int:
+    """Compute adaptive smoothing window: k = max(1, floor(n_layers / 24)).
+
+    Rationale: a 24-layer model gets window=1 (no smoothing beyond single-step
+    diff); a 48-layer model gets window=2; a 96-layer model gets window=4.
+    This keeps the effective smoothing span at ~4% of model depth regardless
+    of scale. Validated empirically against ablation ground truth in tc17bb65.
+    """
+    return max(1, n_layers // 24)
+
+
 def compute_velocity(
     separations: list[float] | NDArray,
-    window: int = 3,
+    window: int | None = None,
 ) -> NDArray[np.float64]:
     """Rate of change of separation across layers (smoothed first derivative).
 
@@ -202,7 +213,10 @@ def compute_velocity(
     separations:
         Sequence of S(l) values, one per layer.
     window:
-        Smoothing window for the gradient computation (default: 3).
+        Smoothing window for the gradient computation. If None (default),
+        uses the adaptive heuristic k = max(1, floor(n_layers / 24)), which
+        keeps smoothing at ~4% of model depth across scales. Pass an explicit
+        integer to override (e.g. window=3 for backwards compatibility).
 
     Returns
     -------
@@ -213,6 +227,9 @@ def compute_velocity(
     seps = np.asarray(separations, dtype=np.float64)
     if len(seps) < 2:
         return np.zeros_like(seps)
+
+    if window is None:
+        window = _auto_velocity_window(len(seps))
 
     # Smooth separations before differencing to reduce noise
     if window > 1 and len(seps) >= window:
