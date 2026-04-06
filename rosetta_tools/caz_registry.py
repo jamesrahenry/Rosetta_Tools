@@ -41,6 +41,34 @@ CONCEPTS = ["credibility", "certainty", "sentiment", "moral_valence",
             "causation", "temporal_order", "negation"]
 
 
+def classify_caz(peak_layer: int, n_layers: int, caz_score: float) -> str:
+    """Classify a CAZ region as embedding, active, or deep.
+
+    Classification is heuristic — provisional until ablation-calibrated.
+
+    embedding : peak in first ~8% of depth. Passive tokenizer-driven
+                separation; the model hasn't had time to compute anything.
+                These coincide with the embedding-leakage pattern observed
+                in credibility for large models.
+    active    : peak between 8% and 80% depth. Transformer-computed assembly.
+                The main zone of interest.
+    deep      : peak above 80% depth. Late-layer integration / unembedding
+                pressure zone.
+
+    The thresholds are deliberately conservative. A layer-0 peak is
+    unambiguously embedding; a layer-3 peak in a 6-layer model is borderline
+    and classified by the 8% rule. Ablation validation (tc17bb65) will
+    ground these empirically.
+    """
+    depth_pct = peak_layer / max(n_layers - 1, 1) * 100
+    if depth_pct < 8.0:
+        return "embedding"
+    elif depth_pct > 80.0:
+        return "deep"
+    else:
+        return "active"
+
+
 @dataclass
 class CAZRegion:
     """One detected CAZ for one model × concept."""
@@ -59,6 +87,8 @@ class CAZRegion:
     # Scores
     caz_score: float
     peak_separation: float
+    # Classification (heuristic — see classify_caz())
+    caz_type: str  # "embedding" | "active" | "deep"
     # Cross-links
     overlapping_ufs: list[str]   # UF### ids whose feature trajectories overlap this CAZ
     overlapping_feature_ids: list[int]  # model-specific feature IDs
@@ -199,6 +229,7 @@ def build_caz_registry(
                     width_depth_pct=round(width, 1),
                     caz_score=round(region.caz_score, 4),
                     peak_separation=round(region.peak_separation, 4),
+                    caz_type=classify_caz(region.peak, n_layers, region.caz_score),
                     overlapping_ufs=sorted(overlapping_ufs),
                     overlapping_feature_ids=sorted(overlapping_fids),
                 )
@@ -253,6 +284,7 @@ def save_caz_registry(
                 "width_depth_pct": caz.width_depth_pct,
                 "caz_score": caz.caz_score,
                 "peak_separation": caz.peak_separation,
+                "caz_type": caz.caz_type,
                 "overlapping_ufs": caz.overlapping_ufs,
                 "overlapping_feature_ids": caz.overlapping_feature_ids,
             }
@@ -263,6 +295,7 @@ def save_caz_registry(
                 "peak_depth_pct": caz.peak_depth_pct,
                 "caz_score": caz.caz_score,
                 "peak_separation": caz.peak_separation,
+                "caz_type": caz.caz_type,
                 "n_overlapping_ufs": len(caz.overlapping_ufs),
                 "overlapping_ufs": caz.overlapping_ufs,
             })
@@ -281,6 +314,7 @@ def save_caz_registry(
                 "width_depth_pct": caz.width_depth_pct,
                 "caz_score": caz.caz_score,
                 "peak_separation": caz.peak_separation,
+                "caz_type": caz.caz_type,
                 "overlapping_ufs": caz.overlapping_ufs,
                 "overlapping_feature_ids": caz.overlapping_feature_ids,
             })
@@ -307,6 +341,7 @@ def save_caz_registry(
                     "peak_depth_pct": caz.peak_depth_pct,
                     "caz_score": caz.caz_score,
                     "peak_separation": caz.peak_separation,
+                    "caz_type": caz.caz_type,
                     "overlapping_ufs": caz.overlapping_ufs,
                     "overlapping_feature_ids": caz.overlapping_feature_ids,
                 })
@@ -337,6 +372,7 @@ def update_atlas_with_cazs(
                     "peak_depth_pct": caz.peak_depth_pct,
                     "caz_score": caz.caz_score,
                     "peak_separation": caz.peak_separation,
+                    "caz_type": caz.caz_type,
                 })
 
     # Update each UF's profile
