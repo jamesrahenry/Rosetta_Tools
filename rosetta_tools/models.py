@@ -83,8 +83,6 @@ REGISTRY: list[ModelEntry] = [
     ModelEntry("meta-llama/Llama-3.2-3B", "llama3", 6.4, encoding_strategy="sparse", gated=True),
 
     # Mistral — Mistral AI, RoPE, GQA, sliding window attention, SwiGLU
-    ModelEntry("mistralai/Ministral-8B-Instruct-2410", "mistral", 16.0, encoding_strategy="sparse",
-               enabled=False, quirks=["Tight on L4 — 16GB bf16, instruct-only (no base)"]),
     ModelEntry("mistralai/Mistral-7B-v0.3", "mistral", 14.5, encoding_strategy="sparse"),
     ModelEntry("mistralai/Mistral-Small-3.1-24B-Base-2503", "mistral", 48.0, encoding_strategy="sparse",
                enabled=False, quirks=["Way too large for L4"]),
