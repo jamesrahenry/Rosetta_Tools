@@ -76,7 +76,7 @@ REGISTRY: list[ModelEntry] = [
     # Gemma 2 — Google, RoPE, GQA, sliding window + global attention alternating
     ModelEntry("google/gemma-2-2b",  "gemma2", 5.1,  encoding_strategy="sparse"),
     ModelEntry("google/gemma-2-9b",  "gemma2", 18.5, encoding_strategy="sparse", enabled=False,
-               quirks=["OOM on L4 (22 GiB) — needs H200 or 8-bit"]),
+               quirks=["OOM in bfloat16 on L4 — use --load-in-8bit (~11 GiB)"]),
 
     # Llama 3.2 — Meta, RoPE, GQA, SwiGLU
     ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, encoding_strategy="sparse", gated=True),
@@ -114,7 +114,7 @@ REGISTRY: list[ModelEntry] = [
                encoding_strategy="sparse", enabled=False, tags=["instruct"]),
     ModelEntry("google/gemma-2-9b-it", "gemma2-instruct", 18.5,
                encoding_strategy="sparse", enabled=False, tags=["instruct"],
-               quirks=["OOM on L4 — same as base gemma-2-9b"]),
+               quirks=["OOM in bfloat16 on L4 — use --load-in-8bit (~11 GiB)"]),
 
     # Llama 3.2 Instruct
     ModelEntry("meta-llama/Llama-3.2-1B-Instruct", "llama3-instruct", 2.4,
