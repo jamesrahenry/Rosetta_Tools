@@ -24,63 +24,73 @@ class ModelEntry:
     gated: bool = False  # requires HF license acceptance
     tags: list[str] = field(default_factory=list)  # e.g. ["instruct", "rlhf"]
     quirks: list[str] = field(default_factory=list)  # known issues/notes
+    # How the model encodes information across layers:
+    #   "redundant" — older MHA architectures (GPT-2, Pythia, OPT, Phi): features
+    #                 persist across many layers; high cross-layer cosine similarity.
+    #                 Deep dive finds many persistent labeled features.
+    #   "sparse"    — newer GQA+SwiGLU architectures (Qwen, Gemma-2, Llama-3.x,
+    #                 Mistral): representations change more rapidly layer-to-layer;
+    #                 features are less redundant. Deep dive finds fewer persistent
+    #                 features; concept directions don't align as strongly with top PCs.
+    #   "unknown"   — not yet classified empirically.
+    encoding_strategy: str = "unknown"  # "redundant" | "sparse" | "unknown"
 
 
 REGISTRY: list[ModelEntry] = [
-    # Pythia — EleutherAI, GPT-NeoX architecture, learned position embeddings
-    ModelEntry("EleutherAI/pythia-70m",   "pythia",  0.2),
-    ModelEntry("EleutherAI/pythia-160m",  "pythia",  0.4),
-    ModelEntry("EleutherAI/pythia-410m",  "pythia",  1.0),
-    ModelEntry("EleutherAI/pythia-1b",    "pythia",  2.1),
-    ModelEntry("EleutherAI/pythia-1.4b",  "pythia",  2.9),
-    ModelEntry("EleutherAI/pythia-2.8b",  "pythia",  5.7),
-    ModelEntry("EleutherAI/pythia-6.9b",  "pythia",  14.0),
+    # Pythia — EleutherAI, GPT-NeoX architecture, MHA, learned position embeddings
+    ModelEntry("EleutherAI/pythia-70m",   "pythia",  0.2,  encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-160m",  "pythia",  0.4,  encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-410m",  "pythia",  1.0,  encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-1b",    "pythia",  2.1,  encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-1.4b",  "pythia",  2.9,  encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-2.8b",  "pythia",  5.7,  encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-6.9b",  "pythia",  14.0, encoding_strategy="redundant"),
 
-    # GPT-2 — OpenAI, learned position embeddings
+    # GPT-2 — OpenAI, MHA, learned position embeddings
     # AutoModel loads GPT2Model (not LMHead) — layers at .h not .transformer.h
-    ModelEntry("openai-community/gpt2",         "gpt2", 0.5,
+    ModelEntry("openai-community/gpt2",         "gpt2", 0.5, encoding_strategy="redundant",
                quirks=["AutoModel: layers at .h (not .transformer.h)"]),
-    ModelEntry("openai-community/gpt2-medium",  "gpt2", 1.4,
+    ModelEntry("openai-community/gpt2-medium",  "gpt2", 1.4, encoding_strategy="redundant",
                quirks=["AutoModel: layers at .h"]),
-    ModelEntry("openai-community/gpt2-large",   "gpt2", 3.1,
+    ModelEntry("openai-community/gpt2-large",   "gpt2", 3.1, encoding_strategy="redundant",
                quirks=["AutoModel: layers at .h"]),
-    ModelEntry("openai-community/gpt2-xl",      "gpt2", 6.3,
+    ModelEntry("openai-community/gpt2-xl",      "gpt2", 6.3, encoding_strategy="redundant",
                quirks=["AutoModel: layers at .h"]),
 
-    # OPT — Meta, learned position embeddings + ALiBi variants
+    # OPT — Meta, MHA, learned position embeddings + ALiBi variants
     # OPT-350m: word_embed_proj_dim=512 != hidden_size=1024 — embedding layer
     # outputs different dim than transformer layers. Feature tracker handles this.
-    ModelEntry("facebook/opt-125m",  "opt", 0.3),
-    ModelEntry("facebook/opt-350m",  "opt", 0.7,
+    ModelEntry("facebook/opt-125m",  "opt", 0.3, encoding_strategy="redundant"),
+    ModelEntry("facebook/opt-350m",  "opt", 0.7, encoding_strategy="redundant",
                quirks=["embed_proj_dim=512 != hidden_size=1024 — dim mismatch at layer 0"]),
-    ModelEntry("facebook/opt-1.3b",  "opt", 2.6),
-    ModelEntry("facebook/opt-2.7b",  "opt", 5.4),
-    ModelEntry("facebook/opt-6.7b",  "opt", 13.4),
+    ModelEntry("facebook/opt-1.3b",  "opt", 2.6, encoding_strategy="redundant"),
+    ModelEntry("facebook/opt-2.7b",  "opt", 5.4, encoding_strategy="redundant"),
+    ModelEntry("facebook/opt-6.7b",  "opt", 13.4, encoding_strategy="redundant"),
 
-    # Qwen 2.5 — Alibaba, RoPE, GQA
-    ModelEntry("Qwen/Qwen2.5-0.5B",  "qwen2", 1.0),
-    ModelEntry("Qwen/Qwen2.5-1.5B",  "qwen2", 3.1),
-    ModelEntry("Qwen/Qwen2.5-3B",    "qwen2", 6.2),
-    ModelEntry("Qwen/Qwen2.5-7B",    "qwen2", 14.5),
+    # Qwen 2.5 — Alibaba, RoPE, GQA, SwiGLU
+    ModelEntry("Qwen/Qwen2.5-0.5B",  "qwen2", 1.0,  encoding_strategy="sparse"),
+    ModelEntry("Qwen/Qwen2.5-1.5B",  "qwen2", 3.1,  encoding_strategy="sparse"),
+    ModelEntry("Qwen/Qwen2.5-3B",    "qwen2", 6.2,  encoding_strategy="sparse"),
+    ModelEntry("Qwen/Qwen2.5-7B",    "qwen2", 14.5, encoding_strategy="sparse"),
 
-    # Gemma 2 — Google, RoPE, sliding window + global attention alternating
-    ModelEntry("google/gemma-2-2b",  "gemma2", 5.1),
-    ModelEntry("google/gemma-2-9b",  "gemma2", 18.5, enabled=False,
+    # Gemma 2 — Google, RoPE, GQA, sliding window + global attention alternating
+    ModelEntry("google/gemma-2-2b",  "gemma2", 5.1,  encoding_strategy="sparse"),
+    ModelEntry("google/gemma-2-9b",  "gemma2", 18.5, encoding_strategy="sparse", enabled=False,
                quirks=["OOM on L4 (22 GiB) — needs H200 or 8-bit"]),
 
-    # Llama 3.2 — Meta, RoPE, GQA
-    ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, gated=True),
-    ModelEntry("meta-llama/Llama-3.2-3B", "llama3", 6.4, gated=True),
+    # Llama 3.2 — Meta, RoPE, GQA, SwiGLU
+    ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, encoding_strategy="sparse", gated=True),
+    ModelEntry("meta-llama/Llama-3.2-3B", "llama3", 6.4, encoding_strategy="sparse", gated=True),
 
-    # Mistral — Mistral AI, RoPE, sliding window attention, GQA
-    ModelEntry("mistralai/Ministral-8B-Instruct-2410", "mistral", 16.0, enabled=False,
-               quirks=["Tight on L4 — 16GB bf16, instruct-only (no base)"]),
-    ModelEntry("mistralai/Mistral-7B-v0.3", "mistral", 14.5),
-    ModelEntry("mistralai/Mistral-Small-3.1-24B-Base-2503", "mistral", 48.0, enabled=False,
-               quirks=["Way too large for L4"]),
+    # Mistral — Mistral AI, RoPE, GQA, sliding window attention, SwiGLU
+    ModelEntry("mistralai/Ministral-8B-Instruct-2410", "mistral", 16.0, encoding_strategy="sparse",
+               enabled=False, quirks=["Tight on L4 — 16GB bf16, instruct-only (no base)"]),
+    ModelEntry("mistralai/Mistral-7B-v0.3", "mistral", 14.5, encoding_strategy="sparse"),
+    ModelEntry("mistralai/Mistral-Small-3.1-24B-Base-2503", "mistral", 48.0, encoding_strategy="sparse",
+               enabled=False, quirks=["Way too large for L4"]),
 
-    # Phi — Microsoft, "textbook" training data, MHA
-    ModelEntry("microsoft/phi-2", "phi", 5.6,
+    # Phi — Microsoft, MHA, "textbook" training data
+    ModelEntry("microsoft/phi-2", "phi", 5.6, encoding_strategy="redundant",
                quirks=["Unusual training mix (synthetic textbooks) — may affect geometry"]),
 
     # ── Instruct variants (RLHF / alignment-tuned) ──
@@ -93,30 +103,30 @@ REGISTRY: list[ModelEntry] = [
 
     # Qwen 2.5 Instruct
     ModelEntry("Qwen/Qwen2.5-0.5B-Instruct", "qwen2-instruct", 1.0,
-               enabled=False, tags=["instruct"]),
+               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
     ModelEntry("Qwen/Qwen2.5-1.5B-Instruct", "qwen2-instruct", 3.1,
-               enabled=False, tags=["instruct"]),
+               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
     ModelEntry("Qwen/Qwen2.5-3B-Instruct",   "qwen2-instruct", 6.2,
-               enabled=False, tags=["instruct"]),
+               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
     ModelEntry("Qwen/Qwen2.5-7B-Instruct",   "qwen2-instruct", 14.5,
-               enabled=False, tags=["instruct"]),
+               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
 
     # Gemma 2 IT (instruction-tuned)
     ModelEntry("google/gemma-2-2b-it", "gemma2-instruct", 5.1,
-               enabled=False, tags=["instruct"]),
+               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
     ModelEntry("google/gemma-2-9b-it", "gemma2-instruct", 18.5,
-               enabled=False, tags=["instruct"],
+               encoding_strategy="sparse", enabled=False, tags=["instruct"],
                quirks=["OOM on L4 — same as base gemma-2-9b"]),
 
     # Llama 3.2 Instruct
     ModelEntry("meta-llama/Llama-3.2-1B-Instruct", "llama3-instruct", 2.4,
-               enabled=False, gated=True, tags=["instruct"]),
+               encoding_strategy="sparse", enabled=False, gated=True, tags=["instruct"]),
     ModelEntry("meta-llama/Llama-3.2-3B-Instruct", "llama3-instruct", 6.4,
-               enabled=False, gated=True, tags=["instruct"]),
+               encoding_strategy="sparse", enabled=False, gated=True, tags=["instruct"]),
 
     # Mistral Instruct
     ModelEntry("mistralai/Mistral-7B-Instruct-v0.3", "mistral-instruct", 14.5,
-               enabled=False, tags=["instruct"]),
+               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
 ]
 
 
@@ -196,6 +206,18 @@ def get_model(model_id: str) -> ModelEntry | None:
         if m.model_id == model_id:
             return m
     return None
+
+
+def encoding_strategy_of(model_id: str) -> str:
+    """Return encoding strategy ('redundant' | 'sparse' | 'unknown') for a model."""
+    m = get_model(model_id)
+    return m.encoding_strategy if m is not None else "unknown"
+
+
+def models_by_encoding(strategy: str, include_disabled: bool = False) -> list[str]:
+    """Return model IDs with the given encoding strategy."""
+    return [m.model_id for m in REGISTRY
+            if m.encoding_strategy == strategy and (include_disabled or m.enabled)]
 
 
 def instruct_pairs(include_disabled: bool = False) -> list[tuple[str, str]]:
