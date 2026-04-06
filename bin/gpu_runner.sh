@@ -152,6 +152,16 @@ for repo in "${PROJECT_REPOS[@]}"; do
         fi
     fi
 done
+
+# Validate rosetta_tools is importable — ephemeral GPU boxes lose pip installs
+# between sessions, so reinstall if needed regardless of pip show status.
+if ! python -c "import rosetta_tools" 2>/dev/null; then
+    echo "rosetta_tools not importable — installing..."
+    pip install -q -e "$HOME/rosetta_tools"
+    echo "  ↳ rosetta_tools installed"
+else
+    echo "rosetta_tools OK"
+fi
 echo ""
 
 # ---------------------------------------------------------------------------
