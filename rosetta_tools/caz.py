@@ -1,5 +1,5 @@
 """
-caz.py — Concept Assembly Zone metric computation.
+caz.py — Concept Allocation Zone metric computation.
 
 Implements the three layer-wise metrics that characterize the CAZ:
 
@@ -12,7 +12,7 @@ And two levels of boundary detection:
   find_caz_boundary   — legacy single-peak detector (wraps the global max)
   find_caz_regions    — multi-modal detector that finds ALL significant
                         separation peaks and returns a CAZProfile describing
-                        the full shape of concept assembly
+                        the full shape of concept allocation
 
 The single-peak API is preserved for backward compatibility.  New analysis
 code should use ``find_caz_regions`` to avoid the assumption that each
@@ -48,7 +48,7 @@ Typical usage
 
     # Full shape (multi-modal):
     profile = find_caz_regions(metrics)
-    print(f"{profile.n_regions} assembly regions, dominant at L{profile.dominant.peak}")
+    print(f"{profile.n_regions} allocation regions, dominant at L{profile.dominant.peak}")
     for region in profile.regions:
         print(f"  L{region.start}–L{region.end}: peak S={region.peak_separation:.3f}")
 """
@@ -445,7 +445,7 @@ def compute_caz_statistics(
 
 @dataclass
 class CAZRegion:
-    """A single assembly region within the S(l) curve.
+    """A single allocation region within the S(l) curve.
 
     One concept may have multiple regions (e.g. a shallow lexical peak
     and a deep compositional peak).  Each region has its own boundaries,
@@ -472,7 +472,7 @@ class CAZRegion:
     rise_span: int                 # layers from start to peak
     fall_span: int                 # layers from peak to end
 
-    # Composite strength score — higher means stronger assembly signal.
+    # Composite strength score — higher means stronger allocation signal.
     # Combines prominence (how much does S stand out from neighbors)
     # with coherence (how geometrically organized is the direction).
     # Range: 0+ (unbounded, but typically 0–1 for most regions).
@@ -481,7 +481,7 @@ class CAZRegion:
 
 @dataclass
 class CAZProfile:
-    """Full shape description of concept assembly across all layers.
+    """Full shape description of concept allocation across all layers.
 
     Replaces the single-peak CAZBoundary with a multi-region view.
     The ``dominant`` property points to the tallest region, preserving
@@ -529,7 +529,7 @@ def find_caz_regions(
     min_prominence_frac: float = 0.10,
     min_peak_distance: int = 2,
 ) -> CAZProfile:
-    """Detect all significant assembly regions in the S(l) curve.
+    """Detect all significant allocation regions in the S(l) curve.
 
     This is the legacy interface with a hard prominence threshold.
     For inclusive detection with scoring, use ``find_caz_regions_scored``.
@@ -563,7 +563,7 @@ def find_caz_regions_scored(
     min_prominence_frac: float = 0.005,
     min_peak_distance: int = 2,
 ) -> CAZProfile:
-    """Detect assembly regions with composite CAZ scoring.
+    """Detect allocation regions with composite CAZ scoring.
 
     Philosophy: cast a wide net, score everything, filter later.
     Any bump in the separation curve that shows geometric organization
@@ -573,7 +573,7 @@ def find_caz_regions_scored(
     Detection
     ---------
     Uses scipy's ``find_peaks`` with a very low prominence floor
-    (default 0.5% of max separation) to catch even subtle assembly
+    (default 0.5% of max separation) to catch even subtle allocation
     events.  Every detected peak gets scored and returned.
 
     Scoring
