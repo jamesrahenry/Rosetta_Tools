@@ -183,6 +183,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         continue
     fi
 
+    # Re-validate rosetta_tools before each job — long-running jobs can drift
+    if ! python -c "import rosetta_tools" 2>/dev/null; then
+        echo "  rosetta_tools lost — reinstalling..."
+        pip install -q -e "$HOME/rosetta_tools"
+    fi
+
     # Run the job, capturing output
     START_TIME=$(date +%s)
     echo "=== JOB $JOB_NUM: $line ===" > "$LOG_FILE"
