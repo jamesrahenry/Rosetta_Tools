@@ -129,17 +129,24 @@ fi
 # ---------------------------------------------------------------------------
 # Sync repos — pull latest code before running anything
 # ---------------------------------------------------------------------------
-PROJECT_REPOS=(
-    "$HOME/semantic_convergence"
-    "$HOME/caz_scaling"
-    "$HOME/rosetta_tools"
-    "$HOME/Rosetta_Manifold"
-    "$HOME/Activation_Manifold_Cartography"
-    "$HOME/Concept_Assembly_Zone"
+
+# Repos that must exist: pull if present, clone if absent.
+# Format: "local_path|remote_url"
+# Remote URLs use the github-personal SSH alias (set up in ~/.ssh/config).
+declare -A REPO_REMOTES=(
+    ["$HOME/semantic_convergence"]=""
+    ["$HOME/caz_scaling"]="git@github-personal:jamesrahenry/caz_scaling.git"
+    ["$HOME/rosetta_tools"]="git@github-personal:jamesrahenry/Rosetta_Tools.git"
+    ["$HOME/Rosetta_Manifold"]=""
+    ["$HOME/Activation_Manifold_Cartography"]=""
+    ["$HOME/Concept_Assembly_Zone"]=""
+    ["$HOME/Rosetta_Concept_Pairs"]="git@github-personal:jamesrahenry/Rosetta_Concept_Pairs.git"
+    ["$HOME/Rosetta_Feature_Library"]="git@github-personal:jamesrahenry/Rosetta_Feature_Library.git"
 )
 
 echo "Syncing repos..."
-for repo in "${PROJECT_REPOS[@]}"; do
+for repo in "${!REPO_REMOTES[@]}"; do
+    remote="${REPO_REMOTES[$repo]}"
     if [[ -d "$repo/.git" ]]; then
         echo -n "  $repo: "
         if git -C "$repo" pull --ff-only --quiet 2>/dev/null; then
@@ -150,6 +157,13 @@ for repo in "${PROJECT_REPOS[@]}"; do
         # Reinstall if it's an editable package (rosetta_tools)
         if [[ -f "$repo/pyproject.toml" ]] && pip show "$(basename "$repo")" &>/dev/null; then
             pip install -q -e "$repo" 2>/dev/null && echo "    ↳ reinstalled editable package"
+        fi
+    elif [[ -n "$remote" ]]; then
+        echo -n "  $repo: not found — cloning from $remote ... "
+        if git clone --quiet "$remote" "$repo" 2>/dev/null; then
+            echo "✓ cloned"
+        else
+            echo "✗ clone failed (check SSH key / remote URL)"
         fi
     fi
 done
