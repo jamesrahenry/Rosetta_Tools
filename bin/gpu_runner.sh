@@ -35,6 +35,7 @@ set -euo pipefail
 CLEAN_CACHE=true
 DRY_RUN=false
 JOBS_FILE=""
+MIN_DISK_GIB=10   # Abort job if free disk falls below this threshold
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -165,6 +166,37 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
+# Disk space helpers
+# ---------------------------------------------------------------------------
+
+free_gib() {
+    # Returns available disk space in GiB on the filesystem containing $HOME
+    df -BG "$HOME" | awk 'NR==2 {gsub("G",""); print $4}'
+}
+
+check_and_recover_disk() {
+    local avail
+    avail=$(free_gib)
+    if [[ "$avail" -lt "$MIN_DISK_GIB" ]]; then
+        echo "  ⚠ Low disk: ${avail} GiB free (threshold: ${MIN_DISK_GIB} GiB) — clearing HF cache..."
+        local cache_dir="${HF_HOME:-$HOME/.cache/huggingface}/hub"
+        if [[ -d "$cache_dir" ]]; then
+            local before
+            before=$(du -sh "$cache_dir" 2>/dev/null | cut -f1)
+            rm -rf "$cache_dir"/models--*
+            echo "  🗑 Cleared HF cache ($before freed)"
+        fi
+        avail=$(free_gib)
+        if [[ "$avail" -lt "$MIN_DISK_GIB" ]]; then
+            echo "  ✗ Still only ${avail} GiB free after cache clear — skipping job to avoid mid-run crash"
+            return 1
+        fi
+        echo "  ✓ Disk recovered: ${avail} GiB free"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Run jobs
 # ---------------------------------------------------------------------------
 JOB_NUM=0
@@ -187,6 +219,14 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     if ! python -c "import rosetta_tools" 2>/dev/null; then
         echo "  rosetta_tools lost — reinstalling..."
         pip install -q -e "$HOME/rosetta_tools"
+    fi
+
+    # Check disk space — clear HF cache if low, skip job if still insufficient
+    echo "  Disk: $(free_gib) GiB free"
+    if ! check_and_recover_disk; then
+        echo "$JOB_NUM|FAIL(no-disk)|0m0s|$line" >> "$STATUS_FILE"
+        echo ""
+        continue
     fi
 
     # Run the job, capturing output
