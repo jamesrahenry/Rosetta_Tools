@@ -91,6 +91,13 @@ echo ""
 # Disable MLflow tracking entirely
 export MLFLOW_TRACKING_URI="file:///dev/null"
 
+# Disable HuggingFace Xet download backend (2026-04-10)
+# huggingface_hub >=1.5.0 enables Xet by default.  Xet changes download
+# behavior and has been observed pulling entire model repos (tflite, onnx,
+# flax, rust weights) instead of just safetensors + config + tokenizer.
+# Falls back to standard HTTPS downloads which respect allow_patterns.
+export HF_HUB_DISABLE_XET=1
+
 # ---------------------------------------------------------------------------
 # Sync repos — pull latest code before running anything
 # ---------------------------------------------------------------------------

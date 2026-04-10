@@ -54,11 +54,44 @@ release_model(model, *, clear_cache=True) -> None
 from __future__ import annotations
 
 import gc
+import os
 import shutil
 from pathlib import Path
 from typing import Literal, Optional
 
 import torch
+
+# ---------------------------------------------------------------------------
+# HuggingFace download filtering  (2026-04-10)
+# ---------------------------------------------------------------------------
+# Transformers' from_pretrained() correctly uses allow_patterns when it calls
+# snapshot_download, so it should NOT pull tflite/onnx/flax/etc.  However,
+# if anything else on the machine triggers a full snapshot_download (e.g.
+# huggingface-cli download, or a stale pre-cache script), the default
+# ignore_patterns will be empty and the entire repo gets pulled.
+#
+# As a safety net, patch huggingface_hub's default ignore patterns at import
+# time.  This only affects snapshot_download calls that don't already pass
+# their own ignore_patterns.
+
+_HF_IGNORE_PATTERNS = [
+    "*.tflite",
+    "*.onnx",
+    "*.ot",           # rust_model.ot
+    "*.msgpack",      # flax_model.msgpack
+    "*.h5",           # tf_model.h5
+    "onnx/*",
+]
+
+try:
+    import huggingface_hub.constants as _hf_constants
+    if hasattr(_hf_constants, "DEFAULT_IGNORE_PATTERNS"):
+        _hf_constants.DEFAULT_IGNORE_PATTERNS = list(
+            set(getattr(_hf_constants, "DEFAULT_IGNORE_PATTERNS", []))
+            | set(_HF_IGNORE_PATTERNS)
+        )
+except ImportError:
+    pass
 
 DtypePreference = Literal["auto", "bfloat16", "float32"]
 
@@ -374,7 +407,6 @@ def purge_hf_cache(model_id: str) -> None:
         print(f"Purged HF cache: {model_id} ({size_gb:.1f} GB freed)")
     else:
         # Try HF_HOME env var
-        import os
         hf_home = os.environ.get("HF_HOME")
         if hf_home:
             cache_dir = Path(hf_home) / "hub" / cache_name
