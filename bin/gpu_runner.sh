@@ -88,43 +88,8 @@ echo "Started:      $(date)"
 echo "=========================================="
 echo ""
 
-# ---------------------------------------------------------------------------
-# MLflow tracking server
-# ---------------------------------------------------------------------------
-MLFLOW_STORE="$HOME/mlflow"
-MLFLOW_PORT=5111
-MLFLOW_URI="http://127.0.0.1:$MLFLOW_PORT"
-
-mkdir -p "$MLFLOW_STORE"
-
-if command -v mlflow &>/dev/null; then
-    # Check if already running
-    if ! curl -s "$MLFLOW_URI/health" &>/dev/null; then
-        echo "Starting MLflow server..."
-        mlflow server \
-            --backend-store-uri "sqlite:///$MLFLOW_STORE/mlflow.db" \
-            --default-artifact-root "$MLFLOW_STORE/artifacts" \
-            --host 0.0.0.0 \
-            --port "$MLFLOW_PORT" \
-            >> "$MLFLOW_STORE/server.log" 2>&1 &
-        MLFLOW_PID=$!
-        # Wait for it to come up
-        for i in $(seq 1 10); do
-            sleep 0.5
-            curl -s "$MLFLOW_URI/health" &>/dev/null && break
-        done
-        echo "  MLflow UI: $MLFLOW_URI"
-    else
-        echo "MLflow server already running at $MLFLOW_URI"
-    fi
-    export MLFLOW_TRACKING_URI="$MLFLOW_URI"
-    echo "  Tracking URI: $MLFLOW_TRACKING_URI"
-    echo "  Tunnel:  ssh -L $MLFLOW_PORT:localhost:$MLFLOW_PORT <this-host>"
-    echo ""
-else
-    echo "mlflow not installed — tracking disabled"
-    echo ""
-fi
+# Disable MLflow tracking entirely
+export MLFLOW_TRACKING_URI="file:///dev/null"
 
 # ---------------------------------------------------------------------------
 # Sync repos — pull latest code before running anything
@@ -139,7 +104,7 @@ declare -A REPO_REMOTES=(
     ["$HOME/rosetta_tools"]="git@github-personal:jamesrahenry/Rosetta_Tools.git"
     ["$HOME/Rosetta_Manifold"]=""
     ["$HOME/Activation_Manifold_Cartography"]=""
-    ["$HOME/Concept_Assembly_Zone"]=""
+    ["$HOME/Concept_Allocation_Zone"]=""
     ["$HOME/Rosetta_Concept_Pairs"]="git@github-personal:jamesrahenry/Rosetta_Concept_Pairs.git"
     ["$HOME/Rosetta_Feature_Library"]="git@github-personal:jamesrahenry/Rosetta_Feature_Library.git"
 )
@@ -160,10 +125,10 @@ for repo in "${!REPO_REMOTES[@]}"; do
         fi
     elif [[ -n "$remote" ]]; then
         echo -n "  $repo: not found — cloning from $remote ... "
-        if git clone --quiet "$remote" "$repo" 2>/dev/null; then
-            echo "✓ cloned"
+        if git clone "$remote" "$repo" 2>&1 | sed 's/^/    /'; then
+            echo "  ✓ cloned"
         else
-            echo "✗ clone failed (check SSH key / remote URL)"
+            echo "  ✗ clone failed — jobs requiring $repo will fail"
         fi
     fi
 done
