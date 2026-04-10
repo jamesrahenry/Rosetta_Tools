@@ -66,6 +66,9 @@ fi
 RUN_DIR="./gpu_runs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RUN_DIR"
 
+# Symlink gpu_runs/current → this run for easy access
+ln -sfn "$(basename "$RUN_DIR")" ./gpu_runs/current
+
 # Copy jobs file for reference
 cp "$JOBS_FILE" "$RUN_DIR/jobs.txt"
 
