@@ -101,6 +101,10 @@ export MLFLOW_TRACKING_URI="file:///dev/null"
 # Falls back to standard HTTPS downloads which respect allow_patterns.
 export HF_HUB_DISABLE_XET=1
 
+# Increase download timeout for large models on flaky connections.
+# Default is 10s which can cause 0-byte failures on 3GB+ weight files.
+export HF_HUB_DOWNLOAD_TIMEOUT=120
+
 # ---------------------------------------------------------------------------
 # Sync repos — pull latest code before running anything
 # ---------------------------------------------------------------------------
