@@ -42,7 +42,7 @@ release_model(model)
 
 ### `rosetta_tools.caz`
 
-Concept Assembly Zone metric computation — no model library dependency.
+Concept Allocation Zone metric computation — no model library dependency.
 Feed in activation arrays, get S/C/v metrics and CAZ boundaries back.
 
 ```python
@@ -119,7 +119,7 @@ pos, neg  = texts_by_label(pairs)
 ## Related
 
 - [Rosetta Manifold](https://github.com/jamesrahenry/Rosetta_Manifold) — empirical CAZ pipeline
-- [Concept Assembly Zone](https://github.com/jamesrahenry/Concept_Assembly_Zone) — theoretical framework
+- [Concept Allocation Zone](https://github.com/jamesrahenry/Concept_Allocation_Zone) — theoretical framework
 - [Pop Goes the Easel](https://github.com/jamesrahenry/pop_goes_the_easel) — companion study
 
 *jamesrahenry@henrynet.ca*
