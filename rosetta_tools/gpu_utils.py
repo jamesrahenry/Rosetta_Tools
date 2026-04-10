@@ -64,15 +64,14 @@ import torch
 # ---------------------------------------------------------------------------
 # HuggingFace download filtering  (2026-04-10)
 # ---------------------------------------------------------------------------
-# Transformers' from_pretrained() correctly uses allow_patterns when it calls
-# snapshot_download, so it should NOT pull tflite/onnx/flax/etc.  However,
-# if anything else on the machine triggers a full snapshot_download (e.g.
-# huggingface-cli download, or a stale pre-cache script), the default
-# ignore_patterns will be empty and the entire repo gets pulled.
-#
-# As a safety net, patch huggingface_hub's default ignore patterns at import
-# time.  This only affects snapshot_download calls that don't already pass
-# their own ignore_patterns.
+# huggingface_hub >=1.5.0 enables the Xet download backend by default.
+# Xet pulls entire model repos (tflite, onnx, flax, rust weights) instead
+# of just safetensors + config + tokenizer, causing multi-GB stalls.
+# Disable it at import time so notebooks and scripts that import
+# rosetta_tools get the fix automatically — no per-user env setup needed.
+
+if not os.environ.get("HF_HUB_DISABLE_XET"):
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 _HF_IGNORE_PATTERNS = [
     "*.tflite",
