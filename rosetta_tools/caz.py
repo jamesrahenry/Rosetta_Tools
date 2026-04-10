@@ -439,6 +439,44 @@ def compute_caz_statistics(
 
 
 # ---------------------------------------------------------------------------
+# Ablation-calibrated priors (tc17bb65)
+# ---------------------------------------------------------------------------
+
+# How much Fisher-based separation predicts functional importance for each
+# attention paradigm.  Derived from ablation-calibration.md and
+# activation-patching.md in the CAZ validation study.
+#
+# fisher_trust: multiplier on caz_score → functional_caz_score.
+#   1.0 = Fisher separation is a reliable proxy for ablation impact.
+#   0.1 = Fisher peaks are mostly geometric artifacts.
+#
+# global_layer_boost: for alternating architectures only — the region
+#   containing the final global attention layer gets this trust level
+#   instead of fisher_trust, because patching recovery is ~1.0 there.
+ABLATION_PRIORS: dict[str, dict[str, float]] = {
+    "mha":         {"fisher_trust": 1.0},
+    "gqa":         {"fisher_trust": 0.35},
+    "alternating": {"fisher_trust": 0.1, "global_layer_boost": 1.0},
+    "unknown":     {"fisher_trust": 0.7},
+}
+
+
+def final_global_attention_layer(n_layers: int) -> int:
+    """For alternating-attention architectures (Gemma-2), return the index of
+    the final global attention layer.
+
+    Gemma-2 uses even-indexed layers for global attention and odd-indexed
+    for sliding-window local attention.  The functional CAZ peak is the
+    final global layer, not the Fisher-based peak.
+
+    Evidence: activation patching recovery ~1.0 at L24 (2b, 26 layers) and
+    L40 (9b, 42 layers) vs 0.461 at the Fisher peak.
+    """
+    last_layer = n_layers - 1
+    return last_layer - (last_layer % 2)  # largest even index
+
+
+# ---------------------------------------------------------------------------
 # Multi-modal CAZ detection
 # ---------------------------------------------------------------------------
 
@@ -478,6 +516,17 @@ class CAZRegion:
     # Range: 0+ (unbounded, but typically 0–1 for most regions).
     caz_score: float = 0.0
 
+    # Architecture-calibrated functional score.  Weights caz_score by how
+    # much Fisher separation predicts ablation impact for this attention
+    # paradigm.  MHA: functional ≈ geometric.  GQA: functional < geometric.
+    # Alternating (Gemma): near-zero except at final global attention layer.
+    # See ABLATION_PRIORS for the empirical calibration factors.
+    functional_caz_score: float = 0.0
+
+    # True if this region contains the architecture-determined functional
+    # peak (e.g. final global attention layer for Gemma-2).
+    is_functional_peak: bool = False
+
 
 @dataclass
 class CAZProfile:
@@ -498,10 +547,26 @@ class CAZProfile:
     global_mean_separation: float  # mean S(l) across all layers
     is_multimodal: bool            # True if 2+ significant regions
 
+    # Architecture awareness (populated when attention_paradigm is passed
+    # to find_caz_regions_scored).
+    attention_paradigm: str = "unknown"
+    functional_peak_layer: int | None = None  # e.g. final global attn layer for Gemma
+
     @property
     def dominant(self) -> CAZRegion:
         """The region with the highest peak separation."""
         return max(self.regions, key=lambda r: r.peak_separation)
+
+    @property
+    def functional_dominant(self) -> CAZRegion:
+        """The region with the highest functional_caz_score.
+
+        For MHA models, this is identical to ``dominant`` (Fisher separation
+        is a reliable proxy).  For alternating architectures (Gemma-2), this
+        returns the region containing the final global attention layer —
+        the actual functional bottleneck — rather than the Fisher peak.
+        """
+        return max(self.regions, key=lambda r: r.functional_caz_score)
 
     @property
     def secondary(self) -> CAZRegion | None:
@@ -528,6 +593,8 @@ def find_caz_regions(
     metrics: list[LayerMetrics],
     min_prominence_frac: float = 0.10,
     min_peak_distance: int = 2,
+    attention_paradigm: str = "unknown",
+    functional_peak_layer: int | None = None,
 ) -> CAZProfile:
     """Detect all significant allocation regions in the S(l) curve.
 
@@ -545,6 +612,10 @@ def find_caz_regions(
     min_peak_distance:
         Minimum distance (in layers) between adjacent peaks.
         Prevents detecting noise ripples as separate regions.
+    attention_paradigm:
+        See ``find_caz_regions_scored``.
+    functional_peak_layer:
+        See ``find_caz_regions_scored``.
 
     Returns
     -------
@@ -555,6 +626,8 @@ def find_caz_regions(
         metrics,
         min_prominence_frac=min_prominence_frac,
         min_peak_distance=min_peak_distance,
+        attention_paradigm=attention_paradigm,
+        functional_peak_layer=functional_peak_layer,
     )
 
 
@@ -562,6 +635,8 @@ def find_caz_regions_scored(
     metrics: list[LayerMetrics],
     min_prominence_frac: float = 0.005,
     min_peak_distance: int = 2,
+    attention_paradigm: str = "unknown",
+    functional_peak_layer: int | None = None,
 ) -> CAZProfile:
     """Detect allocation regions with composite CAZ scoring.
 
@@ -578,7 +653,7 @@ def find_caz_regions_scored(
 
     Scoring
     -------
-    The CAZ score combines three signals:
+    The geometric CAZ score combines three signals:
 
         caz_score = prominence_norm × coherence_boost × width_factor
 
@@ -594,9 +669,13 @@ def find_caz_regions_scored(
         Wider regions are more sustained and less likely to be noise.
         Square root prevents very wide regions from dominating.
 
-    The score is NOT a probability — it's an importance ranking.
-    Strong, coherent, sustained peaks score highest.  Weak, narrow,
-    incoherent bumps score near zero but are still reported.
+    The ``functional_caz_score`` calibrates the geometric score by how
+    much Fisher separation predicts ablation impact for this attention
+    paradigm (see ``ABLATION_PRIORS``).  This resolves the "black hole"
+    problem: high-scoring Gemma CAZ peaks that have zero ablation impact
+    now receive near-zero functional scores, while the architecturally
+    determined functional peak (final global attention layer) receives
+    full weight.
 
     Region boundaries
     -----------------
@@ -614,12 +693,22 @@ def find_caz_regions_scored(
         Use ``caz_score`` to filter rather than raising this.
     min_peak_distance:
         Minimum distance (in layers) between adjacent peaks.
+    attention_paradigm:
+        Attention paradigm of the source model — ``"mha"``, ``"gqa"``,
+        ``"alternating"``, or ``"unknown"``.  Controls how Fisher-based
+        caz_score maps to functional_caz_score.  Use
+        ``rosetta_tools.models.attention_paradigm_of(model_id)`` to look up.
+    functional_peak_layer:
+        Override for the functional peak layer.  For alternating
+        architectures, defaults to ``final_global_attention_layer(n_layers)``
+        if not provided.  The region containing this layer gets boosted
+        functional scoring.
 
     Returns
     -------
     CAZProfile
-        All detected regions with ``caz_score`` populated.
-        Regions are sorted by layer index (start to end of model).
+        All detected regions with ``caz_score`` and ``functional_caz_score``
+        populated.  Regions are sorted by layer index (start to end of model).
     """
     if not metrics:
         raise ValueError("metrics list is empty")
@@ -632,6 +721,15 @@ def find_caz_regions_scored(
     global_peak_sep = float(seps[global_peak])
     global_mean_sep = float(seps.mean())
     global_mean_coh = float(cohs.mean()) if cohs.mean() > 0 else 1e-6
+
+    # ── Ablation-calibrated priors ──
+    priors = ABLATION_PRIORS.get(attention_paradigm, ABLATION_PRIORS["unknown"])
+    fisher_trust = priors["fisher_trust"]
+
+    # For alternating architectures, auto-compute functional peak if not provided
+    _func_peak = functional_peak_layer
+    if attention_paradigm == "alternating" and _func_peak is None:
+        _func_peak = final_global_attention_layer(n_layers)
 
     # Find all peaks — very low prominence floor to be inclusive
     min_prominence = max(min_prominence_frac * global_peak_sep, 1e-6)
@@ -678,11 +776,13 @@ def find_caz_regions_scored(
         region_seps = seps[start:end + 1]
         region_cohs = cohs[start:end + 1]
 
-        # ── CAZ score ──
+        # ── Geometric CAZ score (architecture-blind) ──
         prominence_norm = prominence / global_mean_sep if global_mean_sep > 0 else 0.0
         coherence_boost = 1.0 + pk_coh / global_mean_coh
         width_factor = np.sqrt(width / n_layers) if n_layers > 0 else 0.0
         caz_score = prominence_norm * coherence_boost * width_factor
+
+        is_func_peak = (_func_peak is not None and start <= _func_peak <= end)
 
         regions.append(CAZRegion(
             start=start,
@@ -699,7 +799,27 @@ def find_caz_regions_scored(
             rise_span=rise_span,
             fall_span=fall_span,
             caz_score=round(caz_score, 6),
+            is_functional_peak=is_func_peak,
         ))
+
+    # ── Second pass: functional CAZ scores (architecture-calibrated) ──
+    # Requires all geometric scores to be computed first so that the
+    # functional peak can be scored relative to the max geometric signal.
+    max_caz_score = max((r.caz_score for r in regions), default=0.0)
+
+    for region in regions:
+        if region.is_functional_peak:
+            # The functional peak (e.g. final global attention layer in Gemma)
+            # has verified patching recovery ~1.0.  Its functional importance
+            # is independent of its local Fisher separation.  Score it
+            # proportional to the strongest geometric signal in the model,
+            # weighted by global_layer_boost (default 1.0 = same as MHA).
+            boost = priors.get("global_layer_boost", 1.0)
+            region.functional_caz_score = round(max_caz_score * boost, 6)
+        else:
+            # Non-functional regions: weight geometric score by how much
+            # Fisher separation predicts ablation impact for this paradigm.
+            region.functional_caz_score = round(region.caz_score * fisher_trust, 6)
 
     return CAZProfile(
         n_layers=n_layers,
@@ -709,4 +829,6 @@ def find_caz_regions_scored(
         global_peak_separation=global_peak_sep,
         global_mean_separation=global_mean_sep,
         is_multimodal=len(regions) >= 2,
+        attention_paradigm=attention_paradigm,
+        functional_peak_layer=_func_peak,
     )

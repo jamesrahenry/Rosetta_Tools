@@ -220,6 +220,44 @@ def models_by_encoding(strategy: str, include_disabled: bool = False) -> list[st
             if m.encoding_strategy == strategy and (include_disabled or m.enabled)]
 
 
+# ---------------------------------------------------------------------------
+# Attention paradigm classification
+# ---------------------------------------------------------------------------
+
+ALTERNATING_FAMILIES = frozenset({"gemma2", "gemma2-instruct"})
+
+
+def attention_paradigm_of(model_id: str) -> str:
+    """Return attention paradigm for a model.
+
+    Determines how much Fisher-based separation predicts functional
+    importance, per the ablation calibration study (tc17bb65):
+
+    'mha'         — Multi-head attention (GPT-2, Pythia, OPT, Phi).
+                    Fisher separation strongly predicts functional importance
+                    (sep_reduction=0.704, patching_recovery=0.753).
+    'gqa'         — Grouped-query attention (Qwen, Llama, Mistral).
+                    Fisher separation is a partial proxy for function
+                    (sep_reduction=0.018, patching_recovery=0.653).
+    'alternating' — Sliding-window + global attention alternating (Gemma-2).
+                    Fisher peaks are geometric artifacts ('black holes');
+                    functional peak is the final global attention layer
+                    (sep_reduction=0.000, patching_recovery=~1.0 at final
+                    global layer vs 0.461 at Fisher peak).
+    'unknown'     — Not yet classified.
+    """
+    m = get_model(model_id)
+    if m is None:
+        return "unknown"
+    if m.family in ALTERNATING_FAMILIES:
+        return "alternating"
+    if m.encoding_strategy == "redundant":
+        return "mha"
+    if m.encoding_strategy == "sparse":
+        return "gqa"
+    return "unknown"
+
+
 def instruct_pairs(include_disabled: bool = False) -> list[tuple[str, str]]:
     """Return (base_model_id, instruct_model_id) pairs.
 

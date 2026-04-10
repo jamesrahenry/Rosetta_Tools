@@ -219,9 +219,9 @@ def scan_dark_features(
     log.info("Loading %s...", model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     try:
-        model = AutoModel.from_pretrained(model_id, torch_dtype=dtype, device_map=device)
+        model = AutoModel.from_pretrained(model_id, dtype=dtype, device_map=device)
     except (ValueError, ImportError):
-        model = AutoModel.from_pretrained(model_id, torch_dtype=dtype).to(device)
+        model = AutoModel.from_pretrained(model_id, dtype=dtype).to(device)
     model.eval()
     log_vram("after model load")
 
