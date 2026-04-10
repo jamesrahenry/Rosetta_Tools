@@ -105,6 +105,10 @@ export HF_HUB_DISABLE_XET=1
 # Default is 10s which can cause 0-byte failures on 3GB+ weight files.
 export HF_HUB_DOWNLOAD_TIMEOUT=120
 
+# Use hf_transfer for multi-connection downloads (if installed).
+# More resilient to single-connection drops on large weight files.
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
 # ---------------------------------------------------------------------------
 # Sync repos — pull latest code before running anything
 # ---------------------------------------------------------------------------
