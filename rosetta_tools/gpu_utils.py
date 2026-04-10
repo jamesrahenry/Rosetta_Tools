@@ -54,11 +54,14 @@ release_model(model, *, clear_cache=True) -> None
 from __future__ import annotations
 
 import gc
+import json
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Literal, Optional
 
+import numpy as np
 import torch
 
 # ---------------------------------------------------------------------------
@@ -413,3 +416,93 @@ def purge_hf_cache(model_id: str) -> None:
                 size_gb = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file()) / 1024**3
                 shutil.rmtree(cache_dir)
                 print(f"Purged HF cache: {model_id} ({size_gb:.1f} GB freed)")
+
+
+# ---------------------------------------------------------------------------
+# JSON serialization helpers
+# ---------------------------------------------------------------------------
+
+class NumpyJSONEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy scalars and arrays.
+
+    numpy int64/int32 and float32/float64 scalars are not JSON-serializable
+    by default.  This encoder converts them to their Python equivalents so
+    that json.dump/json.dumps works on dicts that contain numpy values — e.g.
+    feature maps produced by feature_tracker.py where np.unravel_index returns
+    int64 indices that flow into the saved results.
+
+    Usage::
+
+        import json
+        from rosetta_tools.gpu_utils import NumpyJSONEncoder
+        json.dump(data, f, cls=NumpyJSONEncoder, indent=2)
+    """
+
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        return super().default(obj)
+
+
+# ---------------------------------------------------------------------------
+# Resilient model loading (retry on network drops)
+# ---------------------------------------------------------------------------
+
+def load_model_with_retry(
+    model_cls,
+    model_id: str,
+    *,
+    dtype,
+    device: str,
+    max_retries: int = 3,
+    retry_delay: float = 30.0,
+):
+    """Load a HuggingFace model, retrying on network errors.
+
+    Standard HTTP downloads can drop mid-shard on flaky networks
+    (IncompleteRead / ChunkedEncodingError).  The HF cache stores partial
+    downloads, so retrying resumes from where it left off.
+
+    Parameters
+    ----------
+    model_cls:
+        AutoModel class to use, e.g. ``AutoModelForCausalLM`` or ``AutoModel``.
+    model_id:
+        HuggingFace model ID.
+    dtype:
+        torch.dtype to load with.
+    device:
+        Device string (``"cuda"``, ``"cpu"``, etc.).
+    max_retries:
+        Number of download attempts before raising.
+    retry_delay:
+        Seconds to wait between retries.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            try:
+                return model_cls.from_pretrained(model_id, dtype=dtype, device_map=device)
+            except (ValueError, ImportError):
+                return model_cls.from_pretrained(model_id, dtype=dtype).to(device)
+        except OSError as exc:
+            # OSError wraps ChunkedEncodingError / IncompleteRead on network drops
+            last_exc = exc
+            if attempt < max_retries:
+                log.warning(
+                    "Download error for %s (attempt %d/%d): %s — retrying in %.0fs",
+                    model_id, attempt, max_retries, exc, retry_delay,
+                )
+                time.sleep(retry_delay)
+            else:
+                log.error("All %d download attempts failed for %s", max_retries, model_id)
+    raise last_exc  # type: ignore[misc]
