@@ -517,15 +517,32 @@ def load_model_with_retry(
     except OSError:
         pass  # statvfs can fail on some mounts; just continue
 
+    # Phase 1: download weights sequentially (max_workers=1) with retries.
+    #
+    # from_pretrained on sharded models calls snapshot_download internally
+    # with a ThreadPoolExecutor — multiple parallel shard downloads.  On a
+    # flaky connection every parallel attempt fails.  Pre-downloading with
+    # max_workers=1 serialises the shards so one bad shard doesn't kill
+    # the whole batch, and lets us retry just the failed shard.
+    # After a successful snapshot_download, Phase 2 loads from local cache
+    # only (local_files_only=True) so no more network access.
+    from huggingface_hub import snapshot_download
+
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            try:
-                return model_cls.from_pretrained(model_id, dtype=dtype, device_map=device)
-            except (ValueError, ImportError):
-                return model_cls.from_pretrained(model_id, dtype=dtype).to(device)
+            log.info(
+                "Downloading %s (attempt %d/%d, sequential shards)…",
+                model_id, attempt, max_retries,
+            )
+            snapshot_download(
+                model_id,
+                max_workers=1,           # one shard at a time — survives flaky links
+                ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "rust_model*",
+                                  "tf_model*", "*.ot"],
+            )
+            break  # download succeeded
         except OSError as exc:
-            # OSError wraps ChunkedEncodingError / IncompleteRead on network drops
             last_exc = exc
             if attempt < max_retries:
                 log.warning(
@@ -535,4 +552,14 @@ def load_model_with_retry(
                 time.sleep(retry_delay)
             else:
                 log.error("All %d download attempts failed for %s", max_retries, model_id)
-    raise last_exc  # type: ignore[misc]
+                raise
+
+    # Phase 2: load from local cache — no network access.
+    try:
+        return model_cls.from_pretrained(
+            model_id, dtype=dtype, device_map=device, local_files_only=True,
+        )
+    except (ValueError, ImportError):
+        return model_cls.from_pretrained(
+            model_id, dtype=dtype, local_files_only=True,
+        ).to(device)
