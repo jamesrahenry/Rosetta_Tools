@@ -35,7 +35,8 @@ set -euo pipefail
 CLEAN_CACHE=true
 DRY_RUN=false
 JOBS_FILE=""
-MIN_DISK_GIB=10   # Abort job if free disk falls below this threshold
+MIN_DISK_GIB=15   # Abort job if free disk falls below this threshold
+PURGE_DISK_GIB=25 # Purge HF cache between jobs if free disk is below this
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -166,9 +167,37 @@ echo ""
 # Disk space helpers
 # ---------------------------------------------------------------------------
 
+hf_cache_dir() {
+    echo "${HF_HOME:-$HOME/.cache/huggingface}/hub"
+}
+
 free_gib() {
-    # Returns available disk space in GiB on the filesystem containing $HOME
-    df -BG "$HOME" | awk 'NR==2 {gsub("G",""); print $4}'
+    # Returns available disk space in GiB on the filesystem containing HF_HOME.
+    # Checking HF_HOME directly (not $HOME) matters if they're on different mounts.
+    local target="${HF_HOME:-$HOME/.cache/huggingface}"
+    mkdir -p "$target"
+    df -BG "$target" | awk 'NR==2 {gsub("G",""); print $4}'
+}
+
+hf_cache_gib() {
+    local cache_dir
+    cache_dir=$(hf_cache_dir)
+    if [[ -d "$cache_dir" ]]; then
+        du -sBG "$cache_dir" 2>/dev/null | awk '{gsub("G",""); print $1}'
+    else
+        echo 0
+    fi
+}
+
+purge_hf_cache() {
+    local cache_dir
+    cache_dir=$(hf_cache_dir)
+    if [[ -d "$cache_dir" ]]; then
+        local before
+        before=$(du -sh "$cache_dir" 2>/dev/null | cut -f1)
+        rm -rf "$cache_dir"/models--*
+        echo "  Cleared HF cache ($before freed) — $(free_gib) GiB now free"
+    fi
 }
 
 check_and_recover_disk() {
@@ -176,13 +205,7 @@ check_and_recover_disk() {
     avail=$(free_gib)
     if [[ "$avail" -lt "$MIN_DISK_GIB" ]]; then
         echo "  ⚠ Low disk: ${avail} GiB free (threshold: ${MIN_DISK_GIB} GiB) — clearing HF cache..."
-        local cache_dir="${HF_HOME:-$HOME/.cache/huggingface}/hub"
-        if [[ -d "$cache_dir" ]]; then
-            local before
-            before=$(du -sh "$cache_dir" 2>/dev/null | cut -f1)
-            rm -rf "$cache_dir"/models--*
-            echo "  🗑 Cleared HF cache ($before freed)"
-        fi
+        purge_hf_cache
         avail=$(free_gib)
         if [[ "$avail" -lt "$MIN_DISK_GIB" ]]; then
             echo "  ✗ Still only ${avail} GiB free after cache clear — skipping job to avoid mid-run crash"
@@ -191,6 +214,17 @@ check_and_recover_disk() {
         echo "  ✓ Disk recovered: ${avail} GiB free"
     fi
     return 0
+}
+
+maybe_purge_disk() {
+    # Purge HF cache if disk is below PURGE_DISK_GIB regardless of --no-clean.
+    # This prevents mid-run exhaustion when accumulating many large models.
+    local avail
+    avail=$(free_gib)
+    if [[ "$avail" -lt "$PURGE_DISK_GIB" ]]; then
+        echo "  ⚠ Disk pressure: ${avail} GiB free (purge threshold: ${PURGE_DISK_GIB} GiB)"
+        purge_hf_cache
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -257,14 +291,15 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 
     echo "$JOB_NUM|$STATUS|${MINUTES}m${SECONDS}s|$line" >> "$STATUS_FILE"
 
-    # Clean HF cache between jobs to prevent disk exhaustion
+    # Cache cleanup between jobs.
+    # --no-clean skips the full purge but we still purge under disk pressure
+    # (PURGE_DISK_GIB threshold) to prevent mid-run exhaustion when accumulating
+    # many models. Without this, 34 models × ~3 GB = ~100 GB overflows 62 GiB /home.
     if $CLEAN_CACHE && [[ $JOB_NUM -lt $TOTAL ]]; then
-        CACHE_DIR="${HF_HOME:-$HOME/.cache/huggingface}/hub"
-        if [[ -d "$CACHE_DIR" ]]; then
-            CACHE_SIZE=$(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1)
-            rm -rf "$CACHE_DIR"/models--*
-            echo "  🗑 Cleared HF cache ($CACHE_SIZE)"
-        fi
+        echo -n "  Cache: "
+        purge_hf_cache
+    else
+        maybe_purge_disk
     fi
 
     echo ""

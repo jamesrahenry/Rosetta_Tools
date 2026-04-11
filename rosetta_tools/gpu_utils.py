@@ -487,6 +487,36 @@ def load_model_with_retry(
     import logging
     log = logging.getLogger(__name__)
 
+    # Check disk pressure before downloading.  Models range from ~300 MB to
+    # ~14 GB; if /home is near full the download will corrupt mid-shard.
+    # Purge the HF cache if we're below 20 GiB so the download has headroom.
+    _DISK_FLOOR_GIB = 20
+    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    try:
+        stat = os.statvfs(hf_home)
+        free_gib = stat.f_bavail * stat.f_frsize / 1024**3
+        if free_gib < _DISK_FLOOR_GIB:
+            log.warning(
+                "Low disk before loading %s: %.1f GiB free — purging HF cache",
+                model_id, free_gib,
+            )
+            purge_hf_cache(model_id)  # only purges this model's cache if present
+            # Also clear other cached models to free headroom
+            hub_dir = hf_home / "hub"
+            if hub_dir.exists():
+                import shutil as _shutil
+                cleared = 0
+                for entry in sorted(hub_dir.iterdir()):
+                    if entry.name.startswith("models--") and entry.name != f"models--{model_id.replace('/', '--')}":
+                        size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+                        _shutil.rmtree(entry, ignore_errors=True)
+                        cleared += size
+                        if cleared > 10 * 1024**3:  # stop after freeing 10 GB
+                            break
+                log.info("Purged %.1f GB of cached models to free disk", cleared / 1024**3)
+    except OSError:
+        pass  # statvfs can fail on some mounts; just continue
+
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
