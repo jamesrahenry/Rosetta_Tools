@@ -54,21 +54,23 @@ plt.rcParams.update(
 # ---------------------------------------------------------------------------
 
 CONCEPT_META: dict[str, dict] = {
-    "credibility":    {"type": "epistemic",  "color": "#6A1B9A"},
-    "certainty":      {"type": "epistemic",  "color": "#AB47BC"},
+    # Colors kept in sync with caz_scaling/src/viz_style.py CONCEPT_COLORS.
+    # If they ever diverge, viz_style.py is authoritative — update here to match.
+    "credibility":    {"type": "epistemic",  "color": "#7B1FA2"},
+    "certainty":      {"type": "epistemic",  "color": "#AD1457"},
     "sentiment":      {"type": "affective",  "color": "#2E7D32"},
-    "moral_valence":  {"type": "affective",  "color": "#66BB6A"},
+    "moral_valence":  {"type": "affective",  "color": "#00695C"},
     "causation":      {"type": "relational", "color": "#E65100"},
-    "temporal_order": {"type": "relational", "color": "#FFA726"},
-    "negation":       {"type": "syntactic",  "color": "#1565C0"},
-    "plurality":      {"type": "syntactic",  "color": "#42A5F5"},
+    "temporal_order": {"type": "relational", "color": "#827717"},
+    "negation":       {"type": "syntactic",  "color": "#C62828"},
+    "plurality":      {"type": "syntactic",  "color": "#809814"},
 }
 
 TYPE_COLORS = {
-    "epistemic":  "#6A1B9A",
+    "epistemic":  "#7B1FA2",
     "affective":  "#2E7D32",
     "relational": "#E65100",
-    "syntactic":  "#1565C0",
+    "syntactic":  "#C62828",
 }
 
 TYPE_BG = {
