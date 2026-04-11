@@ -460,8 +460,8 @@ def load_model_with_retry(
     *,
     dtype,
     device: str,
-    max_retries: int = 3,
-    retry_delay: float = 30.0,
+    max_retries: int = 15,
+    retry_delay: float = 10.0,
 ):
     """Load a HuggingFace model, retrying on network errors.
 
