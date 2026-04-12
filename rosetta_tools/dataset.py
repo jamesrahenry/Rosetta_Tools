@@ -198,9 +198,11 @@ def validate_dataset(path: str | Path) -> list[str]:
         return [f"File not found: {path}"]
 
     required_fields = {"pair_id", "label", "text"}
-    by_pair: dict[str, dict[int, int]] = defaultdict(dict)  # pair_id -> {label: count}
+    # Key: (pair_id, model_name) — same composite as load_pairs so multi-generator
+    # consensus files don't produce false duplicate warnings.
+    by_pair: dict[tuple[str, str], dict[int, int]] = defaultdict(dict)
     domain_counts: dict[str, int] = defaultdict(int)
-    seen: set[tuple[str, int]] = set()
+    seen: set[tuple[str, str, int]] = set()
 
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
@@ -220,25 +222,31 @@ def validate_dataset(path: str | Path) -> list[str]:
                 continue
 
             pair_id = record["pair_id"]
+            model_name = record.get("model_name", "")
             label = record["label"]
+            pair_key = (pair_id, model_name)
 
-            # Duplicate check
-            key = (pair_id, label)
-            if key in seen:
-                issues.append(f"Duplicate record: pair_id={pair_id!r} label={label}")
-            seen.add(key)
+            # Duplicate check — true duplicate only if same pair_id, model_name, AND label
+            seen_key = (pair_id, model_name, label)
+            if seen_key in seen:
+                qualifier = f" model={model_name!r}" if model_name else ""
+                issues.append(
+                    f"Duplicate record: pair_id={pair_id!r}{qualifier} label={label}"
+                )
+            seen.add(seen_key)
 
-            by_pair[pair_id][label] = by_pair[pair_id].get(label, 0) + 1
+            by_pair[pair_key][label] = by_pair[pair_key].get(label, 0) + 1
 
             if "domain" in record:
                 domain_counts[record["domain"]] += 1
 
     # Completeness
-    for pair_id, labels in by_pair.items():
+    for (pair_id, model_name), labels in by_pair.items():
+        qualifier = f" model={model_name!r}" if model_name else ""
         if 0 not in labels:
-            issues.append(f"Pair {pair_id!r}: missing label 0 (negative)")
+            issues.append(f"Pair {pair_id!r}{qualifier}: missing label 0 (negative)")
         if 1 not in labels:
-            issues.append(f"Pair {pair_id!r}: missing label 1 (positive)")
+            issues.append(f"Pair {pair_id!r}{qualifier}: missing label 1 (positive)")
 
     # Domain balance
     if domain_counts:
