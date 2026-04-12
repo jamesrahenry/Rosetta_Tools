@@ -83,7 +83,10 @@ def load_pairs(path: str | Path) -> list[ConceptPair]:
     if not path.exists():
         raise FileNotFoundError(f"Dataset not found: {path}")
 
-    # Group records by pair_id
+    # Group records by (pair_id, model_name) so multi-generator consensus
+    # datasets produce one ConceptPair per generator rather than collapsing
+    # all versions into one.  For single-generator files model_name is
+    # constant so the key reduces to pair_id — fully backward-compatible.
     by_pair: dict[str, dict[int, dict]] = defaultdict(dict)
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
@@ -95,8 +98,10 @@ def load_pairs(path: str | Path) -> list[ConceptPair]:
             except json.JSONDecodeError as e:
                 raise ValueError(f"Invalid JSON on line {lineno}: {e}") from e
             pair_id = record["pair_id"]
+            model_name = record.get("model_name", "")
+            key = f"{pair_id}__{model_name}" if model_name else pair_id
             label = record["label"]
-            by_pair[pair_id][label] = record
+            by_pair[key][label] = record
 
     pairs = []
     for pair_id, records in sorted(by_pair.items()):
