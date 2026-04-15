@@ -6,6 +6,7 @@ Modules
 gpu_utils   Device selection, dtype resolution, VRAM reporting, model teardown.
 extraction  Model-agnostic layer activation extraction (HF AutoModel).
 caz         CAZ metric computation — separation, coherence, velocity, boundary detection.
+probes      Probe extraction from contrastive activations — layer selection, direction, threshold.
 alignment   Orthogonal Procrustes alignment for cross-architecture vector comparison.
 ablation    Directional ablation hooks for HF AutoModel (mid-stream hypothesis testing).
 dataset     Dataset loading, validation, and pair iteration utilities.
