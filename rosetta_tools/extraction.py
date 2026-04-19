@@ -76,13 +76,17 @@ def _pool(
         return hidden_states[:, 0, :]
 
     if strategy == "last":
-        # Index of the last non-padding token per sequence
-        lengths = attention_mask.sum(dim=1) - 1  # [batch]
+        # Index of the last non-padding token per sequence.
+        # With device_map="auto" (multi-GPU pipeline), hidden_states at deep layers
+        # may live on a different device than attention_mask (which stays on cuda:0).
+        # Move lengths to match hidden_states before indexing.
+        lengths = attention_mask.sum(dim=1) - 1  # [batch] — on attention_mask's device
+        lengths = lengths.to(hidden_states.device)
         batch = torch.arange(hidden_states.size(0), device=hidden_states.device)
         return hidden_states[batch, lengths, :]
 
     # mean — mask out padding, average over real tokens
-    mask_expanded = attention_mask.unsqueeze(-1).float()  # [batch, seq, 1]
+    mask_expanded = attention_mask.to(hidden_states.device).unsqueeze(-1).float()  # [batch, seq, 1]
     summed = (hidden_states.float() * mask_expanded).sum(dim=1)
     count = mask_expanded.sum(dim=1).clamp(min=1e-8)
     return summed / count

@@ -454,12 +454,26 @@ class NumpyJSONEncoder(json.JSONEncoder):
 # Resilient model loading (retry on network drops)
 # ---------------------------------------------------------------------------
 
+def disk_free_gib(path: str | None = None) -> float:
+    """Return free disk space in GiB at the given path (defaults to HF cache dir)."""
+    if path is None:
+        hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+        path = str(hf_home)
+    try:
+        stat = os.statvfs(path)
+        return stat.f_bavail * stat.f_frsize / 1024**3
+    except OSError:
+        return float("inf")
+
+
 def load_model_with_retry(
     model_cls,
     model_id: str,
     *,
     dtype,
     device: str,
+    device_map: str | None = None,
+    load_in_8bit: bool = False,
     max_retries: int = 15,
     retry_delay: float = 10.0,
 ):
@@ -493,8 +507,7 @@ def load_model_with_retry(
     _DISK_FLOOR_GIB = 20
     hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
     try:
-        stat = os.statvfs(hf_home)
-        free_gib = stat.f_bavail * stat.f_frsize / 1024**3
+        free_gib = disk_free_gib(str(hf_home))
         if free_gib < _DISK_FLOOR_GIB:
             log.warning(
                 "Low disk before loading %s: %.1f GiB free — purging HF cache",
@@ -555,9 +568,17 @@ def load_model_with_retry(
                 raise
 
     # Phase 2: load from local cache — no network access.
+    effective_device_map = device_map if device_map is not None else device
+    if load_in_8bit:
+        return model_cls.from_pretrained(
+            model_id,
+            load_in_8bit=True,
+            device_map=effective_device_map,
+            local_files_only=True,
+        )
     try:
         return model_cls.from_pretrained(
-            model_id, dtype=dtype, device_map=device, local_files_only=True,
+            model_id, dtype=dtype, device_map=effective_device_map, local_files_only=True,
         )
     except (ValueError, ImportError):
         return model_cls.from_pretrained(

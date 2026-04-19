@@ -20,9 +20,10 @@ class ModelEntry:
     model_id: str
     family: str
     vram_gb: float  # approximate bf16 VRAM usage
+    hidden_dim: int = 0  # residual stream width (0 = unknown)
     enabled: bool = True  # False = excluded from --all runs (e.g. OOM)
     gated: bool = False  # requires HF license acceptance
-    tags: list[str] = field(default_factory=list)  # e.g. ["instruct", "rlhf"]
+    tags: list[str] = field(default_factory=list)  # e.g. ["instruct", "frontier"]
     quirks: list[str] = field(default_factory=list)  # known issues/notes
     # How the model encodes information across layers:
     #   "redundant" — older MHA architectures (GPT-2, Pythia, OPT, Phi): features
@@ -37,61 +38,91 @@ class ModelEntry:
 
 
 REGISTRY: list[ModelEntry] = [
-    # Pythia — EleutherAI, GPT-NeoX architecture, MHA, learned position embeddings
-    ModelEntry("EleutherAI/pythia-70m",   "pythia",  0.2,  encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-160m",  "pythia",  0.4,  encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-410m",  "pythia",  1.0,  encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-1b",    "pythia",  2.1,  encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-1.4b",  "pythia",  2.9,  encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-2.8b",  "pythia",  5.7,  encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-6.9b",  "pythia",  14.0, encoding_strategy="redundant"),
+    # Pythia — EleutherAI, GPT-NeoX architecture, parallel attn+MLP, RoPE
+    ModelEntry("EleutherAI/pythia-70m",   "pythia",  0.2,  hidden_dim=512,  encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-160m",  "pythia",  0.4,  hidden_dim=768,  encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-410m",  "pythia",  1.0,  hidden_dim=1024, encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-1b",    "pythia",  2.1,  hidden_dim=2048, encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-1.4b",  "pythia",  2.9,  hidden_dim=2048, encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-2.8b",  "pythia",  5.7,  hidden_dim=2560, encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-6.9b",  "pythia",  14.0, hidden_dim=4096, encoding_strategy="redundant"),
+    ModelEntry("EleutherAI/pythia-12b",   "pythia",  24.0, hidden_dim=5120, encoding_strategy="redundant"),
 
     # GPT-2 — OpenAI, MHA, learned position embeddings
     # AutoModel loads GPT2Model (not LMHead) — layers at .h not .transformer.h
-    ModelEntry("openai-community/gpt2",         "gpt2", 0.5, encoding_strategy="redundant",
+    ModelEntry("openai-community/gpt2",         "gpt2", 0.5,  hidden_dim=768,  encoding_strategy="redundant",
                quirks=["AutoModel: layers at .h (not .transformer.h)"]),
-    ModelEntry("openai-community/gpt2-medium",  "gpt2", 1.4, encoding_strategy="redundant",
+    ModelEntry("openai-community/gpt2-medium",  "gpt2", 1.4,  hidden_dim=1024, encoding_strategy="redundant",
                quirks=["AutoModel: layers at .h"]),
-    ModelEntry("openai-community/gpt2-large",   "gpt2", 3.1, encoding_strategy="redundant",
+    ModelEntry("openai-community/gpt2-large",   "gpt2", 3.1,  hidden_dim=1280, encoding_strategy="redundant",
                quirks=["AutoModel: layers at .h"]),
-    ModelEntry("openai-community/gpt2-xl",      "gpt2", 6.3, encoding_strategy="redundant",
+    ModelEntry("openai-community/gpt2-xl",      "gpt2", 6.3,  hidden_dim=1600, encoding_strategy="redundant",
                quirks=["AutoModel: layers at .h"]),
+
+    # GPT-Neo — EleutherAI, MHA, ALiBi positional encoding
+    ModelEntry("EleutherAI/gpt-neo-125m", "gpt-neo", 0.3, hidden_dim=768, encoding_strategy="redundant"),
 
     # OPT — Meta, MHA, learned position embeddings + ALiBi variants
     # OPT-350m: word_embed_proj_dim=512 != hidden_size=1024 — embedding layer
     # outputs different dim than transformer layers. Feature tracker handles this.
-    ModelEntry("facebook/opt-125m",  "opt", 0.3, encoding_strategy="redundant"),
-    ModelEntry("facebook/opt-350m",  "opt", 0.7, encoding_strategy="redundant",
+    ModelEntry("facebook/opt-125m",  "opt", 0.3,  hidden_dim=768,  encoding_strategy="redundant"),
+    ModelEntry("facebook/opt-350m",  "opt", 0.7,  hidden_dim=1024, encoding_strategy="redundant",
                quirks=["embed_proj_dim=512 != hidden_size=1024 — dim mismatch at layer 0"]),
-    ModelEntry("facebook/opt-1.3b",  "opt", 2.6, encoding_strategy="redundant"),
-    ModelEntry("facebook/opt-2.7b",  "opt", 5.4, encoding_strategy="redundant"),
-    ModelEntry("facebook/opt-6.7b",  "opt", 13.4, encoding_strategy="redundant"),
+    ModelEntry("facebook/opt-1.3b",  "opt", 2.6,  hidden_dim=2048, encoding_strategy="redundant"),
+    ModelEntry("facebook/opt-2.7b",  "opt", 5.4,  hidden_dim=2560, encoding_strategy="redundant"),
+    ModelEntry("facebook/opt-6.7b",  "opt", 13.4, hidden_dim=4096, encoding_strategy="redundant"),
 
     # Qwen 2.5 — Alibaba, RoPE, GQA, SwiGLU
-    ModelEntry("Qwen/Qwen2.5-0.5B",  "qwen2", 1.0,  encoding_strategy="sparse"),
-    ModelEntry("Qwen/Qwen2.5-1.5B",  "qwen2", 3.1,  encoding_strategy="sparse"),
-    ModelEntry("Qwen/Qwen2.5-3B",    "qwen2", 6.2,  encoding_strategy="sparse"),
-    ModelEntry("Qwen/Qwen2.5-7B",    "qwen2", 14.5, encoding_strategy="sparse"),
+    ModelEntry("Qwen/Qwen2.5-0.5B",  "qwen2", 1.0,  hidden_dim=896,  encoding_strategy="sparse"),
+    ModelEntry("Qwen/Qwen2.5-1.5B",  "qwen2", 3.1,  hidden_dim=1536, encoding_strategy="sparse"),
+    ModelEntry("Qwen/Qwen2.5-3B",    "qwen2", 6.2,  hidden_dim=2048, encoding_strategy="sparse"),
+    ModelEntry("Qwen/Qwen2.5-7B",    "qwen2", 14.5, hidden_dim=3584, encoding_strategy="sparse"),
+    ModelEntry("Qwen/Qwen2.5-14B",   "qwen2", 28.0, hidden_dim=5120, encoding_strategy="sparse"),
 
-    # Gemma 2 — Google, RoPE, GQA, sliding window + global attention alternating
-    ModelEntry("google/gemma-2-2b",  "gemma2", 5.1,  encoding_strategy="sparse",
+    # Gemma 2 — Google, RoPE, GQA, alternating sliding-window + global attention
+    ModelEntry("google/gemma-2-2b",  "gemma2", 5.1,  hidden_dim=2304, encoding_strategy="sparse",
                quirks=["Extreme sparse encoder — alternating local/global attn produces layer-local features; cos-threshold has no effect on feature count"]),
-    ModelEntry("google/gemma-2-9b",  "gemma2", 18.5, encoding_strategy="sparse", enabled=False,
-               quirks=["OOM in bfloat16 on L4 — use --load-in-8bit (~11 GiB)",
+    ModelEntry("google/gemma-2-9b",  "gemma2", 18.5, hidden_dim=3584, encoding_strategy="sparse",
+               quirks=["Use batch_size=1 on single L4 (18.5GB); device_map='auto' splits across 2x L4 comfortably",
                        "Extreme sparse encoder — cos-threshold has no effect on feature count"]),
 
-    # Llama 3.2 — Meta, RoPE, GQA, SwiGLU
-    ModelEntry("meta-llama/Llama-3.2-1B", "llama3", 2.4, encoding_strategy="sparse", gated=True),
-    ModelEntry("meta-llama/Llama-3.2-3B", "llama3", 6.4, encoding_strategy="sparse", gated=True),
+    # Llama 3.1 — Meta, RoPE, GQA, SwiGLU (larger models)
+    ModelEntry("meta-llama/Llama-3.1-8B",  "llama3", 16.0, hidden_dim=4096, encoding_strategy="sparse", gated=True),
+
+    # Llama 3.2 — Meta, RoPE, GQA, SwiGLU (smaller models)
+    ModelEntry("meta-llama/Llama-3.2-1B",  "llama3", 2.4,  hidden_dim=2048, encoding_strategy="sparse", gated=True),
+    ModelEntry("meta-llama/Llama-3.2-3B",  "llama3", 6.4,  hidden_dim=3072, encoding_strategy="sparse", gated=True),
 
     # Mistral — Mistral AI, RoPE, GQA, sliding window attention, SwiGLU
-    ModelEntry("mistralai/Mistral-7B-v0.3", "mistral", 14.5, encoding_strategy="sparse"),
-    ModelEntry("mistralai/Mistral-Small-3.1-24B-Base-2503", "mistral", 48.0, encoding_strategy="sparse",
-               enabled=False, quirks=["Way too large for L4"]),
+    ModelEntry("mistralai/Mistral-7B-v0.3", "mistral", 14.5, hidden_dim=4096, encoding_strategy="sparse"),
+    ModelEntry("mistralai/Mistral-Small-3.1-24B-Base-2503", "mistral", 48.0, hidden_dim=5120,
+               encoding_strategy="sparse", enabled=False,
+               quirks=["48GB bf16 — fits across 2x L4 with device_map='auto' but very tight"]),
 
     # Phi — Microsoft, MHA, "textbook" training data
-    ModelEntry("microsoft/phi-2", "phi", 5.6, encoding_strategy="redundant",
+    ModelEntry("microsoft/phi-2", "phi", 5.6, hidden_dim=2560, encoding_strategy="redundant",
                quirks=["Unusual training mix (synthetic textbooks) — may affect geometry"]),
+
+    # ── Frontier models (8192-dim, H200 only) ──
+    # Disabled by default — require H200 (141GB VRAM).
+    # 70B models run in 8-bit (~70GB); Falcon-40B fits bf16 (~80GB) on H200.
+    # Use --prh-frontier flag or --model <id> --load-8bit on H200.
+
+    # Falcon — TII, RoPE, multi-query attention (MQA), 60 layers
+    ModelEntry("tiiuae/falcon-40b",      "falcon",  80.0, hidden_dim=8192,
+               encoding_strategy="sparse", enabled=False, tags=["frontier"],
+               quirks=["MQA (not GQA) — verify hidden_size=8192 matches Llama-70B cluster",
+                       "Fits H200 bf16 (~80GB of 141GB)"]),
+
+    # Llama 3.1 70B — Meta, RoPE, GQA, SwiGLU, 80 layers
+    ModelEntry("meta-llama/Llama-3.1-70B", "llama3", 140.0, hidden_dim=8192,
+               encoding_strategy="sparse", enabled=False, gated=True, tags=["frontier"],
+               quirks=["Requires 8-bit on H200 (~70GB of 141GB)", "HF license required"]),
+
+    # Qwen 2.5 72B — Alibaba, RoPE, GQA, SwiGLU, 80 layers
+    ModelEntry("Qwen/Qwen2.5-72B",        "qwen2",  144.0, hidden_dim=8192,
+               encoding_strategy="sparse", enabled=False, tags=["frontier"],
+               quirks=["Requires 8-bit on H200 (~72GB of 141GB)"]),
 
     # ── Instruct variants (RLHF / alignment-tuned) ──
     # Same weights + architecture as base, with RLHF/DPO fine-tuning.
@@ -102,30 +133,30 @@ REGISTRY: list[ModelEntry] = [
     # Use models_by_tag("instruct") or instruct_pairs() to query.
 
     # Qwen 2.5 Instruct
-    ModelEntry("Qwen/Qwen2.5-0.5B-Instruct", "qwen2-instruct", 1.0,
+    ModelEntry("Qwen/Qwen2.5-0.5B-Instruct", "qwen2-instruct", 1.0,  hidden_dim=896,
                encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-    ModelEntry("Qwen/Qwen2.5-1.5B-Instruct", "qwen2-instruct", 3.1,
+    ModelEntry("Qwen/Qwen2.5-1.5B-Instruct", "qwen2-instruct", 3.1,  hidden_dim=1536,
                encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-    ModelEntry("Qwen/Qwen2.5-3B-Instruct",   "qwen2-instruct", 6.2,
+    ModelEntry("Qwen/Qwen2.5-3B-Instruct",   "qwen2-instruct", 6.2,  hidden_dim=2048,
                encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-    ModelEntry("Qwen/Qwen2.5-7B-Instruct",   "qwen2-instruct", 14.5,
+    ModelEntry("Qwen/Qwen2.5-7B-Instruct",   "qwen2-instruct", 14.5, hidden_dim=3584,
                encoding_strategy="sparse", enabled=False, tags=["instruct"]),
 
     # Gemma 2 IT (instruction-tuned)
-    ModelEntry("google/gemma-2-2b-it", "gemma2-instruct", 5.1,
+    ModelEntry("google/gemma-2-2b-it", "gemma2-instruct", 5.1,  hidden_dim=2304,
                encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-    ModelEntry("google/gemma-2-9b-it", "gemma2-instruct", 18.5,
+    ModelEntry("google/gemma-2-9b-it", "gemma2-instruct", 18.5, hidden_dim=3584,
                encoding_strategy="sparse", enabled=False, tags=["instruct"],
-               quirks=["OOM in bfloat16 on L4 — use --load-in-8bit (~11 GiB)"]),
+               quirks=["Use device_map='auto' across 2x L4"]),
 
     # Llama 3.2 Instruct
-    ModelEntry("meta-llama/Llama-3.2-1B-Instruct", "llama3-instruct", 2.4,
+    ModelEntry("meta-llama/Llama-3.2-1B-Instruct", "llama3-instruct", 2.4,  hidden_dim=2048,
                encoding_strategy="sparse", enabled=False, gated=True, tags=["instruct"]),
-    ModelEntry("meta-llama/Llama-3.2-3B-Instruct", "llama3-instruct", 6.4,
+    ModelEntry("meta-llama/Llama-3.2-3B-Instruct", "llama3-instruct", 6.4,  hidden_dim=3072,
                encoding_strategy="sparse", enabled=False, gated=True, tags=["instruct"]),
 
     # Mistral Instruct
-    ModelEntry("mistralai/Mistral-7B-Instruct-v0.3", "mistral-instruct", 14.5,
+    ModelEntry("mistralai/Mistral-7B-Instruct-v0.3", "mistral-instruct", 14.5, hidden_dim=4096,
                encoding_strategy="sparse", enabled=False, tags=["instruct"]),
 ]
 
@@ -194,12 +225,6 @@ def family_of(model_id: str) -> str:
     return "unknown"
 
 
-def models_by_tag(tag: str, include_disabled: bool = False) -> list[str]:
-    """Return model IDs that have a given tag."""
-    return [m.model_id for m in REGISTRY
-            if tag in m.tags and (include_disabled or m.enabled)]
-
-
 def get_model(model_id: str) -> ModelEntry | None:
     """Look up a model entry by ID."""
     for m in REGISTRY:
@@ -218,6 +243,42 @@ def models_by_encoding(strategy: str, include_disabled: bool = False) -> list[st
     """Return model IDs with the given encoding strategy."""
     return [m.model_id for m in REGISTRY
             if m.encoding_strategy == strategy and (include_disabled or m.enabled)]
+
+
+def hidden_dim_of(model_id: str) -> int:
+    """Return hidden dimension for a model (0 if unknown)."""
+    m = get_model(model_id)
+    return m.hidden_dim if m is not None else 0
+
+
+def models_by_hidden_dim(dim: int, include_disabled: bool = False) -> list[str]:
+    """Return model IDs with the given hidden dimension.
+
+    Useful for finding zero-PCA pairs: models at the same hidden_dim
+    can be compared by Procrustes without any dimensionality reduction.
+    """
+    return [m.model_id for m in REGISTRY
+            if m.hidden_dim == dim and (include_disabled or m.enabled)]
+
+
+def zero_pca_clusters(include_disabled: bool = False) -> dict[int, list[str]]:
+    """Return {hidden_dim: [model_ids]} for dims with 2+ models.
+
+    Each entry is a set of models that can be compared without PCA.
+    Only includes dims with at least 2 models (otherwise no pairs exist).
+    """
+    from collections import defaultdict
+    by_dim: dict[int, list[str]] = defaultdict(list)
+    for m in REGISTRY:
+        if m.hidden_dim > 0 and (include_disabled or m.enabled):
+            by_dim[m.hidden_dim].append(m.model_id)
+    return {dim: ids for dim, ids in sorted(by_dim.items()) if len(ids) >= 2}
+
+
+def models_by_tag(tag: str, include_disabled: bool = False) -> list[str]:
+    """Return model IDs that have a given tag."""
+    return [m.model_id for m in REGISTRY
+            if tag in m.tags and (include_disabled or m.enabled)]
 
 
 # ---------------------------------------------------------------------------
