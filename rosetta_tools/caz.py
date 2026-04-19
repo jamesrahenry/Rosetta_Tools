@@ -635,6 +635,7 @@ def find_caz_regions_scored(
     metrics: list[LayerMetrics],
     min_prominence_frac: float = 0.005,
     min_peak_distance: int = 2,
+    min_valley_depth_frac: float = 0.03,
     attention_paradigm: str = "unknown",
     functional_peak_layer: int | None = None,
 ) -> CAZProfile:
@@ -693,6 +694,11 @@ def find_caz_regions_scored(
         Use ``caz_score`` to filter rather than raising this.
     min_peak_distance:
         Minimum distance (in layers) between adjacent peaks.
+    min_valley_depth_frac:
+        Minimum valley depth between adjacent regions, as a fraction of
+        global peak separation.  Adjacent regions whose separating valley
+        is shallower than this threshold are merged into one.  Default
+        0.03 (3%).  Set to 0 to disable merging (legacy behaviour).
     attention_paradigm:
         Attention paradigm of the source model — ``"mha"``, ``"gqa"``,
         ``"alternating"``, or ``"unknown"``.  Controls how Fisher-based
@@ -801,6 +807,65 @@ def find_caz_regions_scored(
             caz_score=round(caz_score, 6),
             is_functional_peak=is_func_peak,
         ))
+
+    # ── Valley-merge pass ──────────────────────────────────────────────────────
+    # Merge adjacent regions whose separating valley is shallower than
+    # min_valley_depth_frac * global_peak_sep.  Smooth-hump curves (e.g.
+    # large GQA models) produce contiguous adjacent regions with trivial
+    # valleys; without this pass every layer gets shaded and discrete bands
+    # become invisible.  3% of global peak is conservative — genuine
+    # multimodal structure has valleys of ≥10%.
+    if min_valley_depth_frac > 0 and len(regions) > 1:
+        min_valley_abs = min_valley_depth_frac * global_peak_sep
+        changed = True
+        while changed:
+            changed = False
+            merged: list[CAZRegion] = [regions[0]]
+            for curr in regions[1:]:
+                prev = merged[-1]
+                # Valley = minimum sep in the span strictly between the two peaks
+                lo, hi = (min(prev.peak, curr.peak), max(prev.peak, curr.peak))
+                valley_sep = float(seps[lo: hi + 1].min()) if hi > lo else float(seps[lo])
+                lower_peak = min(float(seps[prev.peak]), float(seps[curr.peak]))
+                depth = lower_peak - valley_sep
+                if depth < min_valley_abs:
+                    # Merge: expand prev to cover curr
+                    new_start = prev.start
+                    new_end   = curr.end
+                    new_peak  = int(np.argmax(seps[new_start: new_end + 1])) + new_start
+                    new_width = new_end - new_start + 1
+                    reg_seps  = seps[new_start: new_end + 1]
+                    reg_cohs  = cohs[new_start: new_end + 1]
+                    new_pk_sep  = float(seps[new_peak])
+                    new_pk_coh  = float(cohs[new_peak])
+                    # Prominence for merged region: height above its lowest boundary
+                    boundary_min = float(min(seps[new_start], seps[new_end]))
+                    new_prom = new_pk_sep - boundary_min
+                    prom_norm  = new_prom / global_mean_sep if global_mean_sep > 0 else 0.0
+                    coh_boost  = 1.0 + new_pk_coh / global_mean_coh
+                    wf         = np.sqrt(new_width / n_layers) if n_layers > 0 else 0.0
+                    new_score  = prom_norm * coh_boost * wf
+                    is_func    = (_func_peak is not None
+                                  and new_start <= _func_peak <= new_end)
+                    merged[-1] = CAZRegion(
+                        start=new_start, peak=new_peak, end=new_end,
+                        width=new_width,
+                        peak_separation=new_pk_sep,
+                        peak_coherence=new_pk_coh,
+                        mean_separation=float(reg_seps.mean()),
+                        mean_coherence=float(reg_cohs.mean()),
+                        prominence=new_prom,
+                        depth_pct=100.0 * new_peak / n_layers if n_layers > 0 else 0.0,
+                        width_pct=100.0 * new_width / n_layers if n_layers > 0 else 0.0,
+                        rise_span=max(new_peak - new_start, 1),
+                        fall_span=max(new_end - new_peak, 1),
+                        caz_score=round(new_score, 6),
+                        is_functional_peak=is_func,
+                    )
+                    changed = True
+                else:
+                    merged.append(curr)
+            regions = merged
 
     # ── Second pass: functional CAZ scores (architecture-calibrated) ──
     # Requires all geometric scores to be computed first so that the
