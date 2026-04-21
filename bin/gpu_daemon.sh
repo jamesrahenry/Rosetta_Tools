@@ -2,11 +2,15 @@
 # gpu_daemon.sh — Hopper-driven GPU job daemon.
 #
 # Polls for open gpu-job tasks, runs them one at a time, marks complete.
-# Jobs are added from any machine via:
-#   hopper task add "Phase 1 — Cluster A" --description "cd ~/semantic_convergence && python ..." --tag gpu-job
+# After each completion, scans blocked gpu-job tasks and unblocks any whose
+# dependencies (listed as "### depends:ID1,ID2,..." in the description) are
+# all completed.
+#
+# Jobs are added from any machine via queue_jobs.sh:
+#   bash ~/rosetta_tools/bin/queue_jobs.sh jobs/prh_full.txt
 #
 # Run in tmux so you can detach:
-#   tmux new-session -d -s gpu 'bash ~/semantic_convergence/scripts/gpu_daemon.sh'
+#   tmux new-session -d -s gpu 'bash ~/rosetta_tools/bin/gpu_daemon.sh'
 #   tmux attach -t gpu
 #
 # Written: 2026-04-20 UTC
@@ -63,12 +67,56 @@ sync_repos() {
     python -c "import rosetta_tools" 2>/dev/null || { log "rosetta_tools missing — installing"; pip install -q -e "$HOME/rosetta_tools"; }
 }
 
-get_command() {
-    # Extract the Description field from hopper task get output.
-    # Description runs from "Description:" to the next blank-or-field line.
+get_full_description() {
     hopper task get "$1" 2>/dev/null \
         | awk '/^Description:/{found=1; next} found && /^(Tags:|Assigned|Created|Updated|Body:|$)/{exit} found{print}' \
         | sed 's/^[[:space:]]*//'
+}
+
+get_command() {
+    # Strip the "### depends:..." trailer if present
+    get_full_description "$1" | sed 's/ *### depends:.*$//'
+}
+
+get_deps() {
+    # Extract comma-separated dep IDs from "### depends:ID1,ID2,..."
+    get_full_description "$1" | grep -o '### depends:[^ ]*' | sed 's/### depends://' || true
+}
+
+task_status() {
+    hopper task get "$1" 2>/dev/null | awk '/^Status:/{print $2; exit}'
+}
+
+# ---------------------------------------------------------------------------
+# Dependency resolution — call after each completed task
+# ---------------------------------------------------------------------------
+
+resolve_blocked() {
+    local blocked_ids
+    blocked_ids=$(hopper task list --tag gpu-job --status blocked --ids-only 2>/dev/null || true)
+    [[ -z "$blocked_ids" ]] && return
+
+    while IFS= read -r tid; do
+        [[ -z "$tid" ]] && continue
+        local deps; deps=$(get_deps "$tid")
+        [[ -z "$deps" ]] && continue
+
+        local all_done=true
+        IFS=',' read -ra dep_list <<< "$deps"
+        for dep in "${dep_list[@]}"; do
+            [[ -z "$dep" ]] && continue
+            local s; s=$(task_status "$dep")
+            if [[ "$s" != "completed" ]]; then
+                all_done=false
+                break
+            fi
+        done
+
+        if $all_done; then
+            log "Unblocking $tid (all dependencies completed)"
+            hopper task status "$tid" open -f 2>/dev/null || true
+        fi
+    done <<< "$blocked_ids"
 }
 
 # ---------------------------------------------------------------------------
@@ -113,7 +161,7 @@ run_job() {
 
     local start; start=$(date +%s)
 
-    # Heartbeat in background — every 10 min, also syncs so remote sees it
+    # Heartbeat in background — every 10 min, syncs so remote sees it
     (
         while sleep 600; do
             hopper task heartbeat "$task_id" 2>/dev/null || true
@@ -121,7 +169,6 @@ run_job() {
         done
     ) &
     local hb_pid=$!
-    trap "kill $hb_pid 2>/dev/null || true" RETURN
 
     set +e
     bash -c "$cmd" >> "$log_file" 2>&1
@@ -129,7 +176,6 @@ run_job() {
     set -e
 
     kill "$hb_pid" 2>/dev/null || true
-    trap - RETURN
 
     local elapsed=$(( $(date +%s) - start ))
     local duration="$(( elapsed/60 ))m$(( elapsed%60 ))s"
@@ -142,15 +188,18 @@ run_job() {
     if [[ $exit_code -eq 0 ]]; then
         log "✓ $task_id complete ($duration)"
         hopper task status "$task_id" completed -f
+        sync_hopper
+        resolve_blocked
+        sync_hopper
     else
         log "✗ $task_id FAILED (exit=$exit_code, ${duration}) — see $log_file"
         hopper task status "$task_id" blocked -f
         hopper task update "$task_id" \
             --description "$cmd  [FAILED exit=$exit_code $duration log=$(basename $log_file)]" \
             2>/dev/null || true
+        sync_hopper
     fi
 
-    sync_hopper
     purge_hf_cache
 }
 
@@ -176,5 +225,5 @@ while true; do
             log "Queue empty — sleeping ${POLL_INTERVAL}s"
             sleep "$POLL_INTERVAL"
         fi
-    } || log "⚠ loop iteration failed — sleeping ${POLL_INTERVAL}s before retry"; sleep "${POLL_INTERVAL}"
+    } || { log "⚠ loop iteration failed — sleeping ${POLL_INTERVAL}s before retry"; sleep "$POLL_INTERVAL"; }
 done
