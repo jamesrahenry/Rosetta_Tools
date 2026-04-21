@@ -72,23 +72,21 @@ sync_repos() {
 }
 
 get_full_description() {
-    hopper task get "$1" 2>/dev/null \
-        | awk '/^Description:/{found=1; next} found && /^(Tags:|Assigned|Created|Updated|Body:|$)/{exit} found{print}' \
-        | sed 's/^[[:space:]]*//'
+    # Use JSON to get the raw description — text output wraps long lines
+    # which breaks grep patterns like "### depends:..."
+    hopper --json task get "$1" 2>/dev/null | jq -r '.description // empty'
 }
 
 get_command() {
-    # Strip the "### depends:..." trailer if present
     get_full_description "$1" | sed 's/ *### depends:.*$//'
 }
 
 get_deps() {
-    # Extract comma-separated dep IDs from "### depends:ID1,ID2,..."
     get_full_description "$1" | grep -o '### depends:[^ ]*' | sed 's/### depends://' || true
 }
 
 task_status() {
-    hopper task get "$1" 2>/dev/null | awk '/^Status:/{print $2; exit}'
+    hopper --json task get "$1" 2>/dev/null | jq -r '.status // empty'
 }
 
 # ---------------------------------------------------------------------------
@@ -221,7 +219,7 @@ reclaim_interrupted() {
     while IFS= read -r tid; do
         [[ -z "$tid" ]] && continue
         local assigned
-        assigned=$(hopper task get "$tid" 2>/dev/null | awk '/^Assigned/{print $2}')
+        assigned=$(hopper --json task get "$tid" 2>/dev/null | jq -r '.assigned_to // empty')
         if [[ "$assigned" == "$IDENTITY" ]]; then
             log "Reclaiming interrupted task $tid → open"
             hopper task status "$tid" open -f 2>/dev/null || true
