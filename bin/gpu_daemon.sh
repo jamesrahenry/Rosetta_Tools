@@ -166,7 +166,8 @@ echo ""
 while true; do
     sync_hopper
 
-    task_id=$(hopper task list --tag gpu-job --status open --ids-only --sort-by created 2>/dev/null | head -1)
+    task_id=$(hopper task list --tag gpu-job --status open --ids-only 2>/dev/null | tail -1)
+    log "Next task: ${task_id:-<none>}"
 
     if [[ -n "$task_id" ]]; then
         run_job "$task_id"
