@@ -248,7 +248,8 @@ while true; do
     {
         sync_hopper
 
-        task_id=$(hopper task list --tag gpu-job --status open --ids-only 2>/dev/null | tail -1)
+        task_id=$(hopper --json task list --tag gpu-job --status open 2>/dev/null \
+            | jq -r 'sort_by(.created_at) | first | .id // empty')
         log "Next task: ${task_id:-<none>}"
 
         if [[ -n "$task_id" ]]; then
