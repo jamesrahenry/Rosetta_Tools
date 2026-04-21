@@ -240,6 +240,7 @@ echo ""
 
 sync_hopper
 reclaim_interrupted
+resolve_blocked
 sync_hopper
 
 while true; do
