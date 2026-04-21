@@ -11,7 +11,7 @@
 #
 # Written: 2026-04-20 UTC
 
-set -euo pipefail
+set -uo pipefail
 
 IDENTITY="gpu:$(hostname)"
 POLL_INTERVAL=30      # seconds between polls when idle
@@ -164,15 +164,17 @@ log "Logs → $LOG_DIR"
 echo ""
 
 while true; do
-    sync_hopper
+    {
+        sync_hopper
 
-    task_id=$(hopper task list --tag gpu-job --status open --ids-only 2>/dev/null | tail -1)
-    log "Next task: ${task_id:-<none>}"
+        task_id=$(hopper task list --tag gpu-job --status open --ids-only 2>/dev/null | tail -1)
+        log "Next task: ${task_id:-<none>}"
 
-    if [[ -n "$task_id" ]]; then
-        run_job "$task_id"
-    else
-        log "Queue empty — sleeping ${POLL_INTERVAL}s"
-        sleep "$POLL_INTERVAL"
-    fi
+        if [[ -n "$task_id" ]]; then
+            run_job "$task_id" || log "⚠ run_job exited non-zero for $task_id — continuing"
+        else
+            log "Queue empty — sleeping ${POLL_INTERVAL}s"
+            sleep "$POLL_INTERVAL"
+        fi
+    } || log "⚠ loop iteration failed — sleeping ${POLL_INTERVAL}s before retry"; sleep "${POLL_INTERVAL}"
 done
