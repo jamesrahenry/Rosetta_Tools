@@ -149,6 +149,8 @@ run_job() {
     local ts; ts=$(date +%Y%m%d_%H%M%S)
     local log_file="$LOG_DIR/${ts}_${task_id}.log"
 
+    ln -sfn "$log_file" "$LOG_DIR/current.log"  # always points to active job
+
     log "Command: $cmd"
     log "Log:     $log_file"
 
