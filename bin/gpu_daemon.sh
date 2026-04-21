@@ -23,6 +23,10 @@ LOG_DIR="${HOME}/gpu_runs"
 MIN_DISK_GIB=15
 
 mkdir -p "$LOG_DIR"
+DAEMON_LOG="$LOG_DIR/daemon.log"
+
+# Tee all daemon output to daemon.log — survives tmux detach/reattach
+exec > >(tee -a "$DAEMON_LOG") 2>&1
 
 export MLFLOW_TRACKING_URI="file:///dev/null"
 export HF_HUB_DISABLE_XET=1
@@ -212,6 +216,7 @@ run_job() {
 log "Starting — identity: $IDENTITY"
 log "Polling every ${POLL_INTERVAL}s for open gpu-job tasks"
 log "Logs → $LOG_DIR"
+log "Daemon log → $DAEMON_LOG  (tail -f to follow)"
 echo ""
 
 while true; do
