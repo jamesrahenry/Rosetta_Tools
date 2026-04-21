@@ -59,10 +59,10 @@ sync_repos() {
     local repos=("$HOME/semantic_convergence" "$HOME/rosetta_tools")
     for repo in "${repos[@]}"; do
         [[ -d "$repo/.git" ]] || continue
-        if git -C "$repo" pull --ff-only --quiet 2>/dev/null; then
+        if git -C "$repo" pull --ff-only --autostash --quiet 2>/dev/null; then
             log "  pulled $(basename $repo)"
         else
-            log "  ⚠ pull skipped (dirty or diverged): $(basename $repo)"
+            log "  ⚠ pull skipped (diverged): $(basename $repo)"
         fi
         if [[ -f "$repo/pyproject.toml" ]]; then
             pip install -q -e "$repo" 2>/dev/null && log "  reinstalled $(basename $repo)"
