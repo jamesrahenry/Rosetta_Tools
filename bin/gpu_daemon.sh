@@ -210,6 +210,27 @@ run_job() {
 }
 
 # ---------------------------------------------------------------------------
+# Startup: reclaim any in_progress tasks left by a previous daemon crash
+# ---------------------------------------------------------------------------
+
+reclaim_interrupted() {
+    local ids
+    ids=$(hopper task list --tag gpu-job --status in_progress --ids-only 2>/dev/null || true)
+    [[ -z "$ids" ]] && return
+
+    while IFS= read -r tid; do
+        [[ -z "$tid" ]] && continue
+        local assigned
+        assigned=$(hopper task get "$tid" 2>/dev/null | awk '/^Assigned/{print $2}')
+        if [[ "$assigned" == "$IDENTITY" ]]; then
+            log "Reclaiming interrupted task $tid → open"
+            hopper task status "$tid" open -f 2>/dev/null || true
+            hopper task update "$tid" --unassign 2>/dev/null || true
+        fi
+    done <<< "$ids"
+}
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -218,6 +239,10 @@ log "Polling every ${POLL_INTERVAL}s for open gpu-job tasks"
 log "Logs → $LOG_DIR"
 log "Daemon log → $DAEMON_LOG  (tail -f to follow)"
 echo ""
+
+sync_hopper
+reclaim_interrupted
+sync_hopper
 
 while true; do
     {
