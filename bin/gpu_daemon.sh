@@ -56,7 +56,7 @@ purge_hf_cache() {
 }
 
 sync_repos() {
-    local repos=("$HOME/rosetta_tools" "$HOME/rosetta_analysis")
+    local repos=("$HOME/rosetta_tools" "$HOME/rosetta_analysis" "$HOME/Rosetta_Concept_Pairs")
     for repo in "${repos[@]}"; do
         [[ -d "$repo/.git" ]] || { [[ -L "$repo" ]] && repo=$(readlink -f "$repo"); } || continue
         [[ -d "$repo/.git" ]] || continue
