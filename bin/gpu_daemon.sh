@@ -198,9 +198,6 @@ run_job() {
     else
         log "✗ $task_id FAILED (exit=$exit_code, ${duration}) — see $log_file"
         hopper task status "$task_id" blocked -f
-        hopper task update "$task_id" \
-            --description "$cmd  [FAILED exit=$exit_code $duration log=$(basename $log_file)]" \
-            2>/dev/null || true
         sync_hopper
     fi
 
