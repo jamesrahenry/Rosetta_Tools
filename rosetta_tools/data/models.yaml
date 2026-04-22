@@ -1,0 +1,708 @@
+# models.yaml — Rosetta model registry
+# Updated: 2026-04-22 UTC
+#
+# Fields
+# ------
+# model_id      HuggingFace repo ID
+# family        Architecture family (pythia / gpt2 / opt / qwen2 / gemma2 / gemma4 /
+#               llama3 / mistral / mixtral / phi / falcon)
+# hidden_dim    Residual stream width
+# n_layers      Number of transformer layers
+# vram_bf16     Approximate bf16 VRAM in GB (used for scheduling)
+# cluster       PRH zero-PCA cluster — models in the same cluster share hidden_dim
+#               and can be Procrustes-aligned without PCA compression.
+#               A=768, B=2048, C=4096, D=3584, E=5120, G=5376, F=8192, scale=ladder
+#               null = not included in PRH sweep
+# encoding      How representations evolve across layers:
+#               redundant — older MHA (GPT-2, Pythia, OPT): features persist
+#                           across many layers, high cross-layer cosine similarity
+#               sparse    — modern GQA+SwiGLU (Qwen, Llama, Mistral, Gemma):
+#                           representations change rapidly, fewer persistent features
+# attention     mha | gqa | alternating
+#               alternating = Gemma-2/4 sliding-window + global attention pattern;
+#               Fisher peaks are MHA resonance artifacts, not semantic landmarks
+# quantization  null | 4bit | 8bit — required to fit on available hardware
+#               null  = fits bf16 on a single L4 (22GB)
+#               4bit  = nf4 bitsandbytes required (Mixtral, large Qwen, Gemma4)
+#               8bit  = H200-class only (70B+ models)
+# enabled       Include in --prh-proxy / default sweep runs
+# gated         Requires HF license acceptance before download
+# tags          instruct, frontier, moe, scale, rlhf-pair
+# notes         Architecture quirks, known issues, empirical observations
+
+models:
+
+  # ===========================================================================
+  # CLUSTER A — 768-dim
+  # Small models; consistently flat CAZ structure. Value is as null controls
+  # only. Run gpt2 + pythia-160m as representatives; skip the rest.
+  # ===========================================================================
+
+  - model_id: openai-community/gpt2
+    family: gpt2
+    hidden_dim: 768
+    n_layers: 12
+    vram_bf16: 0.5
+    cluster: A
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+    notes: "Null control for Cluster A. AutoModel exposes layers at .h not .transformer.h"
+
+  - model_id: EleutherAI/gpt-neo-125m
+    family: gpt-neo
+    hidden_dim: 768
+    n_layers: 12
+    vram_bf16: 0.3
+    cluster: A
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+    notes: "ALiBi positional encoding. Cluster A null control — skip in favour of gpt2."
+
+  - model_id: EleutherAI/pythia-160m
+    family: pythia
+    hidden_dim: 768
+    n_layers: 12
+    vram_bf16: 0.4
+    cluster: A
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+    notes: "NeoX, parallel attn+MLP, RoPE. Cluster A null control alongside gpt2."
+
+  - model_id: facebook/opt-125m
+    family: opt
+    hidden_dim: 768
+    n_layers: 12
+    vram_bf16: 0.3
+    cluster: A
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+    notes: "Learned positions. Cluster A null control — skip in favour of gpt2/pythia."
+
+  # ===========================================================================
+  # CLUSTER B — 2048-dim
+  # Consistently flat emergence in prior runs. Keep pythia-1b as null control;
+  # Qwen2.5-3B kept for within-family scale ladder continuity.
+  # ===========================================================================
+
+  - model_id: EleutherAI/pythia-1b
+    family: pythia
+    hidden_dim: 2048
+    n_layers: 16
+    vram_bf16: 2.1
+    cluster: B
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+    notes: "Cluster B null control."
+
+  - model_id: facebook/opt-1.3b
+    family: opt
+    hidden_dim: 2048
+    n_layers: 24
+    vram_bf16: 2.6
+    cluster: B
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+    notes: "Cluster B — redundant with pythia-1b."
+
+  - model_id: meta-llama/Llama-3.2-1B
+    family: llama3
+    hidden_dim: 2048
+    n_layers: 16
+    vram_bf16: 2.4
+    cluster: B
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: true
+    tags: []
+    notes: "Gated. Sparse encoder in 2048-dim — interesting architecture contrast with pythia-1b but flat CAZ."
+
+  - model_id: Qwen/Qwen2.5-3B
+    family: qwen2
+    hidden_dim: 2048
+    n_layers: 36
+    vram_bf16: 6.2
+    cluster: B
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+    notes: "Kept for Qwen within-family scale ladder. 36 layers for 2048-dim is unusually deep."
+
+  # ===========================================================================
+  # CLUSTER C — 4096-dim  (confirmed crystallization tier)
+  # Strong CAZ structure, sharp pre→post delta. Core comparison set.
+  # Mixtral tests MoE at same dim/depth as confirmed dense models.
+  # ===========================================================================
+
+  - model_id: EleutherAI/pythia-6.9b
+    family: pythia
+    hidden_dim: 4096
+    n_layers: 32
+    vram_bf16: 14.0
+    cluster: C
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: []
+    notes: "Canonical redundant-encoder baseline at 4096-dim. Strongest CAZ signal in MHA tier."
+
+  - model_id: facebook/opt-6.7b
+    family: opt
+    hidden_dim: 4096
+    n_layers: 32
+    vram_bf16: 13.4
+    cluster: C
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: []
+    notes: "GEM ablation failure case — investigate OPT-specific geometry anomaly."
+
+  - model_id: meta-llama/Llama-3.1-8B
+    family: llama3
+    hidden_dim: 4096
+    n_layers: 32
+    vram_bf16: 16.0
+    cluster: C
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: true
+    gated: true
+    tags: []
+    notes: "Canonical sparse-encoder baseline at 4096-dim."
+
+  - model_id: meta-llama/Llama-3.1-8B-Instruct
+    family: llama3
+    hidden_dim: 4096
+    n_layers: 32
+    vram_bf16: 16.0
+    cluster: C
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: true
+    gated: true
+    tags: [instruct, rlhf-pair]
+    notes: "Instruct variant of Llama-3.1-8B. RLHF centripetal hypothesis test."
+
+  - model_id: mistralai/Mistral-7B-v0.3
+    family: mistral
+    hidden_dim: 4096
+    n_layers: 32
+    vram_bf16: 14.5
+    cluster: C
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: true
+    gated: false
+    tags: []
+    notes: "Sliding window attention. SWA may affect layer-wise feature persistence."
+
+  - model_id: mistralai/Mixtral-8x7B-v0.1
+    family: mixtral
+    hidden_dim: 4096
+    n_layers: 32
+    vram_bf16: 93.0
+    cluster: C
+    encoding: sparse
+    attention: gqa
+    quantization: 4bit
+    enabled: true
+    gated: false
+    tags: [moe]
+    notes: "MoE at same dim/depth as confirmed dense models. Controlled MoE test. ~24GB at nf4."
+
+  # ===========================================================================
+  # CLUSTER D — 3584-dim
+  # Different families, different dim. Gemma-2-9b is the alternating-attention
+  # architecture case study (black hole CAZ / Fisher artifact finding).
+  # ===========================================================================
+
+  - model_id: Qwen/Qwen2.5-7B
+    family: qwen2
+    hidden_dim: 3584
+    n_layers: 28
+    vram_bf16: 14.5
+    cluster: D
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: true
+    gated: false
+    tags: []
+    notes: "Qwen2 at 3584-dim. Fits single L4 comfortably."
+
+  - model_id: google/gemma-2-9b
+    family: gemma2
+    hidden_dim: 3584
+    n_layers: 42
+    vram_bf16: 18.5
+    cluster: D
+    encoding: sparse
+    attention: alternating
+    quantization: null
+    enabled: true
+    gated: false
+    tags: []
+    notes: >
+      Alternating sliding-window + global attention. Fisher peaks are MHA
+      resonance artifacts — functional CAZ is at final global attention layer.
+      Use batch_size=1 on single L4 or device_map=auto across 2x L4.
+
+  # ===========================================================================
+  # CLUSTER E — 5120-dim
+  # Scale step up from Cluster C. Qwen2.5-32B needs 4-bit.
+  # ===========================================================================
+
+  - model_id: EleutherAI/pythia-12b
+    family: pythia
+    hidden_dim: 5120
+    n_layers: 36
+    vram_bf16: 24.0
+    cluster: E
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: []
+    notes: "Needs device_map=auto across 2x L4 for bf16."
+
+  - model_id: Qwen/Qwen2.5-14B
+    family: qwen2
+    hidden_dim: 5120
+    n_layers: 48
+    vram_bf16: 28.0
+    cluster: E
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: true
+    gated: false
+    tags: []
+    notes: "Needs device_map=auto across 2x L4 for bf16."
+
+  - model_id: Qwen/Qwen2.5-32B
+    family: qwen2
+    hidden_dim: 5120
+    n_layers: 64
+    vram_bf16: 64.0
+    cluster: E
+    encoding: sparse
+    attention: gqa
+    quantization: 4bit
+    enabled: true
+    gated: false
+    tags: []
+    notes: "~16GB at nf4. 64 layers is the deepest in the L4-runnable set."
+
+  # ===========================================================================
+  # CLUSTER G — 5376-dim  (Gemma 4, new)
+  # Both models are gated and require 4-bit. MoE vs dense at same dim/family.
+  # First Gemma4 data point; alternating attention paradigm expected.
+  # ===========================================================================
+
+  - model_id: google/gemma-4-27b-it
+    family: gemma4
+    hidden_dim: 5376
+    n_layers: 46
+    vram_bf16: 55.0
+    cluster: G
+    encoding: sparse
+    attention: alternating
+    quantization: 4bit
+    enabled: true
+    gated: true
+    tags: [moe, instruct]
+    notes: "Gemma4 MoE, 27B total / ~4B active per token, 46 layers. ~15GB at nf4. Gated."
+
+  - model_id: google/gemma-4-12b-it
+    family: gemma4
+    hidden_dim: 5376
+    n_layers: 46
+    vram_bf16: 24.0
+    cluster: G
+    encoding: sparse
+    attention: alternating
+    quantization: null
+    enabled: true
+    gated: true
+    tags: [instruct]
+    notes: "Gemma4 dense 12B, 46 layers. Fits across 2x L4 bf16. Gated."
+
+  # ===========================================================================
+  # CLUSTER F — 8192-dim  (frontier, H200 only)
+  # Deferred until hardware upgrade. Not included in L4 sweeps.
+  # ===========================================================================
+
+  - model_id: tiiuae/falcon-40b
+    family: falcon
+    hidden_dim: 8192
+    n_layers: 60
+    vram_bf16: 80.0
+    cluster: F
+    encoding: sparse
+    attention: mha
+    quantization: null
+    enabled: false
+    gated: false
+    tags: [frontier]
+    notes: "MQA (not GQA). Fits H200 bf16 (~80GB of 141GB). H200 only."
+
+  - model_id: meta-llama/Llama-3.1-70B
+    family: llama3
+    hidden_dim: 8192
+    n_layers: 80
+    vram_bf16: 140.0
+    cluster: F
+    encoding: sparse
+    attention: gqa
+    quantization: 8bit
+    enabled: false
+    gated: true
+    tags: [frontier]
+    notes: "Requires 8-bit on H200 (~70GB). HF license required. H200 only."
+
+  - model_id: Qwen/Qwen2.5-72B
+    family: qwen2
+    hidden_dim: 8192
+    n_layers: 80
+    vram_bf16: 144.0
+    cluster: F
+    encoding: sparse
+    attention: gqa
+    quantization: 8bit
+    enabled: false
+    gated: false
+    tags: [frontier]
+    notes: "Requires 8-bit on H200 (~72GB). H200 only."
+
+  # ===========================================================================
+  # SCALE LADDER — within-family only, cross-dim
+  # Not zero-PCA pairs. Reported separately with PCA caveats.
+  # Pythia: controlled architecture, same training data, cleanest scale signal.
+  # Qwen: modern sparse encoder scale reference.
+  # ===========================================================================
+
+  - model_id: EleutherAI/pythia-70m
+    family: pythia
+    hidden_dim: 512
+    n_layers: 6
+    vram_bf16: 0.2
+    cluster: scale
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+    notes: "Bottom of Pythia scale ladder."
+
+  - model_id: EleutherAI/pythia-410m
+    family: pythia
+    hidden_dim: 1024
+    n_layers: 24
+    vram_bf16: 1.0
+    cluster: scale
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+
+  - model_id: EleutherAI/pythia-2.8b
+    family: pythia
+    hidden_dim: 2560
+    n_layers: 32
+    vram_bf16: 5.7
+    cluster: scale
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+
+  - model_id: Qwen/Qwen2.5-0.5B
+    family: qwen2
+    hidden_dim: 896
+    n_layers: 28
+    vram_bf16: 1.0
+    cluster: scale
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+    notes: "Bottom of Qwen scale ladder."
+
+  - model_id: Qwen/Qwen2.5-1.5B
+    family: qwen2
+    hidden_dim: 1536
+    n_layers: 28
+    vram_bf16: 3.1
+    cluster: scale
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [scale]
+
+  # ===========================================================================
+  # NOT IN SWEEP — registry entries for reference / CIA / future use
+  # ===========================================================================
+
+  - model_id: openai-community/gpt2-xl
+    family: gpt2
+    hidden_dim: 1600
+    n_layers: 48
+    vram_bf16: 6.3
+    cluster: null
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+    notes: "Legacy. AutoModel: layers at .h"
+
+  - model_id: facebook/opt-350m
+    family: opt
+    hidden_dim: 1024
+    n_layers: 24
+    vram_bf16: 0.7
+    cluster: null
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+    notes: "word_embed_proj_dim=512 != hidden_size=1024 — dim mismatch at layer 0."
+
+  - model_id: facebook/opt-2.7b
+    family: opt
+    hidden_dim: 2560
+    n_layers: 32
+    vram_bf16: 5.4
+    cluster: null
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+
+  - model_id: google/gemma-2-2b
+    family: gemma2
+    hidden_dim: 2304
+    n_layers: 26
+    vram_bf16: 5.1
+    cluster: null
+    encoding: sparse
+    attention: alternating
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+    notes: "Extreme sparse encoder — alternating local/global attn; cos-threshold has no effect on feature count."
+
+  - model_id: meta-llama/Llama-3.2-3B
+    family: llama3
+    hidden_dim: 3072
+    n_layers: 28
+    vram_bf16: 6.4
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: true
+    tags: []
+
+  - model_id: microsoft/phi-2
+    family: phi
+    hidden_dim: 2560
+    n_layers: 32
+    vram_bf16: 5.6
+    cluster: null
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+    notes: >
+      Unusual synthetic textbook training. Only model (1/24) that violates
+      universal concept ordering — suspected training data artifact.
+
+  - model_id: mistralai/Mistral-Small-3.1-24B-Base-2503
+    family: mistral
+    hidden_dim: 5120
+    n_layers: 40
+    vram_bf16: 48.0
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: false
+    tags: []
+    notes: "48GB bf16 — tight across 2x L4. Not yet run."
+
+  # Instruct pairs — disabled by default, used for RLHF geometry audit
+
+  - model_id: Qwen/Qwen2.5-0.5B-Instruct
+    family: qwen2
+    hidden_dim: 896
+    n_layers: 28
+    vram_bf16: 1.0
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: false
+    tags: [instruct, rlhf-pair]
+
+  - model_id: Qwen/Qwen2.5-1.5B-Instruct
+    family: qwen2
+    hidden_dim: 1536
+    n_layers: 28
+    vram_bf16: 3.1
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: false
+    tags: [instruct, rlhf-pair]
+
+  - model_id: Qwen/Qwen2.5-3B-Instruct
+    family: qwen2
+    hidden_dim: 2048
+    n_layers: 36
+    vram_bf16: 6.2
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: false
+    tags: [instruct, rlhf-pair]
+
+  - model_id: Qwen/Qwen2.5-7B-Instruct
+    family: qwen2
+    hidden_dim: 3584
+    n_layers: 28
+    vram_bf16: 14.5
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: false
+    tags: [instruct, rlhf-pair]
+
+  - model_id: google/gemma-2-2b-it
+    family: gemma2
+    hidden_dim: 2304
+    n_layers: 26
+    vram_bf16: 5.1
+    cluster: null
+    encoding: sparse
+    attention: alternating
+    quantization: null
+    enabled: false
+    gated: false
+    tags: [instruct, rlhf-pair]
+
+  - model_id: google/gemma-2-9b-it
+    family: gemma2
+    hidden_dim: 3584
+    n_layers: 42
+    vram_bf16: 18.5
+    cluster: null
+    encoding: sparse
+    attention: alternating
+    quantization: null
+    enabled: false
+    gated: false
+    tags: [instruct, rlhf-pair]
+    notes: "Use device_map=auto across 2x L4."
+
+  - model_id: meta-llama/Llama-3.2-1B-Instruct
+    family: llama3
+    hidden_dim: 2048
+    n_layers: 16
+    vram_bf16: 2.4
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: true
+    tags: [instruct, rlhf-pair]
+
+  - model_id: meta-llama/Llama-3.2-3B-Instruct
+    family: llama3
+    hidden_dim: 3072
+    n_layers: 28
+    vram_bf16: 6.4
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: true
+    tags: [instruct, rlhf-pair]
+
+  - model_id: mistralai/Mistral-7B-Instruct-v0.3
+    family: mistral
+    hidden_dim: 4096
+    n_layers: 32
+    vram_bf16: 14.5
+    cluster: null
+    encoding: sparse
+    attention: gqa
+    quantization: null
+    enabled: false
+    gated: false
+    tags: [instruct, rlhf-pair]

@@ -1,0 +1,157 @@
+# concepts.yaml — Rosetta concept registry
+# Updated: 2026-04-22 UTC
+#
+# Fields
+# ------
+# name               Canonical identifier (matches *_consensus_pairs.jsonl stem)
+# category           epistemic | syntactic | relational | affective | security
+# pipelines          Which analysis pipelines use this concept:
+#                    caz   — CAZ/PRH extraction and alignment
+#                    cia   — Concept Integrity Auditor (probe + adversarial)
+# assembly_depth_pct Mean peak depth as % of model depth (from 22-model study; null = not yet measured)
+# assembly_depth_std Cross-model standard deviation (null = not yet measured)
+# notes              Exclusions, caveats, or dataset issues
+
+concepts:
+
+  # ===========================================================================
+  # EPISTEMIC — how certainty, evidence, and credibility are signalled
+  # ===========================================================================
+
+  - name: credibility
+    category: epistemic
+    pipelines: [caz, cia]
+    assembly_depth_pct: 39.6
+    assembly_depth_std: 29.7
+    notes: "Earliest assembly depth in the epistemic cluster. High cross-model variance."
+
+  - name: certainty
+    category: epistemic
+    pipelines: [caz, cia]
+    assembly_depth_pct: 64.2
+    assembly_depth_std: 14.2
+
+  - name: specificity
+    category: epistemic
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+    notes: "Not yet measured in scaling study."
+
+  # ===========================================================================
+  # SYNTACTIC — structural/grammatical properties of text
+  # ===========================================================================
+
+  - name: negation
+    category: syntactic
+    pipelines: [caz, cia]
+    assembly_depth_pct: 49.8
+    assembly_depth_std: 17.3
+
+  - name: plurality
+    category: syntactic
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+
+  - name: formality
+    category: syntactic
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+
+  # ===========================================================================
+  # RELATIONAL — concepts defined by relationships between events or entities
+  # ===========================================================================
+
+  - name: causation
+    category: relational
+    pipelines: [caz, cia]
+    assembly_depth_pct: 53.6
+    assembly_depth_std: 18.2
+    notes: "Shares assembly direction with temporal_order at depth (cos=0.89). Relational handoff shifts earlier in larger models."
+
+  - name: temporal_order
+    category: relational
+    pipelines: [caz, cia]
+    assembly_depth_pct: 56.1
+    assembly_depth_std: 16.8
+    notes: "Shares assembly direction with causation at depth. Relational handoff shifts earlier in larger models."
+
+  - name: agency
+    category: relational
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+
+  # ===========================================================================
+  # AFFECTIVE — emotional and evaluative content
+  # ===========================================================================
+
+  - name: sentiment
+    category: affective
+    pipelines: [caz, cia]
+    assembly_depth_pct: 61.8
+    assembly_depth_std: 13.6
+
+  - name: moral_valence
+    category: affective
+    pipelines: [caz, cia]
+    assembly_depth_pct: 68.1
+    assembly_depth_std: 14.1
+    notes: "Deepest assembly in the affective cluster."
+
+  - name: sarcasm
+    category: affective
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+
+  - name: deception
+    category: affective
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+
+  # ===========================================================================
+  # SECURITY — concepts with direct safety/security relevance
+  # All are in both CAZ and CIA pipelines except obfuscation (CIA only).
+  # ===========================================================================
+
+  - name: threat_severity
+    category: security
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+    notes: "Sparse dataset — 20 pair_ids. Generation in progress (target 100)."
+
+  - name: urgency
+    category: security
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+    notes: "Sparse dataset — 20 pair_ids. Generation in progress (target 100)."
+
+  - name: authorization
+    category: security
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+    notes: "Sparse dataset — 20 pair_ids. Generation in progress (target 100)."
+
+  - name: exfiltration
+    category: security
+    pipelines: [caz, cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+    notes: "Sparse dataset — 20 pair_ids. Generation in progress (target 100)."
+
+  - name: obfuscation
+    category: security
+    pipelines: [cia]
+    assembly_depth_pct: null
+    assembly_depth_std: null
+    notes: >
+      CIA pipeline only. Positive examples are tokenisation-encoded text
+      (leet/base64/homoglyphs) — geometric signal is tokenisation artifact,
+      not semantic contrast. Excluded from CAZ/PRH analysis.

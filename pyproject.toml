@@ -25,6 +25,7 @@ dependencies = [
     "mlflow>=2.10",
     "accelerate>=0.26",
     "bitsandbytes>=0.41",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -39,3 +40,6 @@ Homepage = "https://github.com/jamesrahenry/Rosetta_Tools"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["rosetta_tools*"]
+
+[tool.setuptools.package-data]
+rosetta_tools = ["data/*.yaml"]

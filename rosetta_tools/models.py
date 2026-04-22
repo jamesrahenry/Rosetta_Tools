@@ -1,366 +1,247 @@
-"""Central model & concept registry for Rosetta Program experiments.
+"""
+models.py — Rosetta model and concept registry loader.
 
-All scripts should import from here rather than maintaining their own lists.
+Data lives in rosetta_tools/data/models.yaml and concepts.yaml.
+This module loads them at import time and exposes query functions.
 
-    from rosetta_tools.models import all_models, families, CONCEPTS, get_model
+    from rosetta_tools.models import (
+        all_models, models_by_cluster, models_by_family,
+        get_model, vram_gb, attention_paradigm_of,
+        instruct_pairs, concepts_by_pipeline,
+    )
 """
 
 from __future__ import annotations
 
+import importlib.resources
 from dataclasses import dataclass, field
+from functools import lru_cache
+from typing import Any
+
+import yaml
 
 
 # ---------------------------------------------------------------------------
-# Models
+# Data classes
 # ---------------------------------------------------------------------------
 
 @dataclass
 class ModelEntry:
-    """One model in the registry."""
     model_id: str
     family: str
-    vram_gb: float  # approximate bf16 VRAM usage
-    hidden_dim: int = 0  # residual stream width (0 = unknown)
-    enabled: bool = True  # False = excluded from --all runs (e.g. OOM)
-    gated: bool = False  # requires HF license acceptance
-    tags: list[str] = field(default_factory=list)  # e.g. ["instruct", "frontier"]
-    quirks: list[str] = field(default_factory=list)  # known issues/notes
-    # How the model encodes information across layers:
-    #   "redundant" — older MHA architectures (GPT-2, Pythia, OPT, Phi): features
-    #                 persist across many layers; high cross-layer cosine similarity.
-    #                 Deep dive finds many persistent labeled features.
-    #   "sparse"    — newer GQA+SwiGLU architectures (Qwen, Gemma-2, Llama-3.x,
-    #                 Mistral): representations change more rapidly layer-to-layer;
-    #                 features are less redundant. Deep dive finds fewer persistent
-    #                 features; concept directions don't align as strongly with top PCs.
-    #   "unknown"   — not yet classified empirically.
-    encoding_strategy: str = "unknown"  # "redundant" | "sparse" | "unknown"
+    hidden_dim: int
+    n_layers: int
+    vram_bf16: float
+    cluster: str | None          # A/B/C/D/E/F/G/scale/null
+    encoding: str                # redundant | sparse | unknown
+    attention: str               # mha | gqa | alternating | unknown
+    quantization: str | None     # null | 4bit | 8bit
+    enabled: bool
+    gated: bool
+    tags: list[str] = field(default_factory=list)
+    notes: str = ""
 
-
-REGISTRY: list[ModelEntry] = [
-    # Pythia — EleutherAI, GPT-NeoX architecture, parallel attn+MLP, RoPE
-    ModelEntry("EleutherAI/pythia-70m",   "pythia",  0.2,  hidden_dim=512,  encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-160m",  "pythia",  0.4,  hidden_dim=768,  encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-410m",  "pythia",  1.0,  hidden_dim=1024, encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-1b",    "pythia",  2.1,  hidden_dim=2048, encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-1.4b",  "pythia",  2.9,  hidden_dim=2048, encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-2.8b",  "pythia",  5.7,  hidden_dim=2560, encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-6.9b",  "pythia",  14.0, hidden_dim=4096, encoding_strategy="redundant"),
-    ModelEntry("EleutherAI/pythia-12b",   "pythia",  24.0, hidden_dim=5120, encoding_strategy="redundant"),
-
-    # GPT-2 — OpenAI, MHA, learned position embeddings
-    # AutoModel loads GPT2Model (not LMHead) — layers at .h not .transformer.h
-    ModelEntry("openai-community/gpt2",         "gpt2", 0.5,  hidden_dim=768,  encoding_strategy="redundant",
-               quirks=["AutoModel: layers at .h (not .transformer.h)"]),
-    ModelEntry("openai-community/gpt2-medium",  "gpt2", 1.4,  hidden_dim=1024, encoding_strategy="redundant",
-               quirks=["AutoModel: layers at .h"]),
-    ModelEntry("openai-community/gpt2-large",   "gpt2", 3.1,  hidden_dim=1280, encoding_strategy="redundant",
-               quirks=["AutoModel: layers at .h"]),
-    ModelEntry("openai-community/gpt2-xl",      "gpt2", 6.3,  hidden_dim=1600, encoding_strategy="redundant",
-               quirks=["AutoModel: layers at .h"]),
-
-    # GPT-Neo — EleutherAI, MHA, ALiBi positional encoding
-    ModelEntry("EleutherAI/gpt-neo-125m", "gpt-neo", 0.3, hidden_dim=768, encoding_strategy="redundant"),
-
-    # OPT — Meta, MHA, learned position embeddings + ALiBi variants
-    # OPT-350m: word_embed_proj_dim=512 != hidden_size=1024 — embedding layer
-    # outputs different dim than transformer layers. Feature tracker handles this.
-    ModelEntry("facebook/opt-125m",  "opt", 0.3,  hidden_dim=768,  encoding_strategy="redundant"),
-    ModelEntry("facebook/opt-350m",  "opt", 0.7,  hidden_dim=1024, encoding_strategy="redundant",
-               quirks=["embed_proj_dim=512 != hidden_size=1024 — dim mismatch at layer 0"]),
-    ModelEntry("facebook/opt-1.3b",  "opt", 2.6,  hidden_dim=2048, encoding_strategy="redundant"),
-    ModelEntry("facebook/opt-2.7b",  "opt", 5.4,  hidden_dim=2560, encoding_strategy="redundant"),
-    ModelEntry("facebook/opt-6.7b",  "opt", 13.4, hidden_dim=4096, encoding_strategy="redundant"),
-
-    # Qwen 2.5 — Alibaba, RoPE, GQA, SwiGLU
-    ModelEntry("Qwen/Qwen2.5-0.5B",  "qwen2", 1.0,  hidden_dim=896,  encoding_strategy="sparse"),
-    ModelEntry("Qwen/Qwen2.5-1.5B",  "qwen2", 3.1,  hidden_dim=1536, encoding_strategy="sparse"),
-    ModelEntry("Qwen/Qwen2.5-3B",    "qwen2", 6.2,  hidden_dim=2048, encoding_strategy="sparse"),
-    ModelEntry("Qwen/Qwen2.5-7B",    "qwen2", 14.5, hidden_dim=3584, encoding_strategy="sparse"),
-    ModelEntry("Qwen/Qwen2.5-14B",   "qwen2", 28.0, hidden_dim=5120, encoding_strategy="sparse"),
-
-    # Gemma 2 — Google, RoPE, GQA, alternating sliding-window + global attention
-    ModelEntry("google/gemma-2-2b",  "gemma2", 5.1,  hidden_dim=2304, encoding_strategy="sparse",
-               quirks=["Extreme sparse encoder — alternating local/global attn produces layer-local features; cos-threshold has no effect on feature count"]),
-    ModelEntry("google/gemma-2-9b",  "gemma2", 18.5, hidden_dim=3584, encoding_strategy="sparse",
-               quirks=["Use batch_size=1 on single L4 (18.5GB); device_map='auto' splits across 2x L4 comfortably",
-                       "Extreme sparse encoder — cos-threshold has no effect on feature count"]),
-
-    # Llama 3.1 — Meta, RoPE, GQA, SwiGLU (larger models)
-    ModelEntry("meta-llama/Llama-3.1-8B",  "llama3", 16.0, hidden_dim=4096, encoding_strategy="sparse", gated=True),
-
-    # Llama 3.2 — Meta, RoPE, GQA, SwiGLU (smaller models)
-    ModelEntry("meta-llama/Llama-3.2-1B",  "llama3", 2.4,  hidden_dim=2048, encoding_strategy="sparse", gated=True),
-    ModelEntry("meta-llama/Llama-3.2-3B",  "llama3", 6.4,  hidden_dim=3072, encoding_strategy="sparse", gated=True),
-
-    # Mistral — Mistral AI, RoPE, GQA, sliding window attention, SwiGLU
-    ModelEntry("mistralai/Mistral-7B-v0.3", "mistral", 14.5, hidden_dim=4096, encoding_strategy="sparse"),
-    ModelEntry("mistralai/Mistral-Small-3.1-24B-Base-2503", "mistral", 48.0, hidden_dim=5120,
-               encoding_strategy="sparse", enabled=False,
-               quirks=["48GB bf16 — fits across 2x L4 with device_map='auto' but very tight"]),
-
-    # Phi — Microsoft, MHA, "textbook" training data
-    ModelEntry("microsoft/phi-2", "phi", 5.6, hidden_dim=2560, encoding_strategy="redundant",
-               quirks=["Unusual training mix (synthetic textbooks) — may affect geometry"]),
-
-    # ── Frontier models (8192-dim, H200 only) ──
-    # Disabled by default — require H200 (141GB VRAM).
-    # 70B models run in 8-bit (~70GB); Falcon-40B fits bf16 (~80GB) on H200.
-    # Use --prh-frontier flag or --model <id> --load-8bit on H200.
-
-    # Falcon — TII, RoPE, multi-query attention (MQA), 60 layers
-    ModelEntry("tiiuae/falcon-40b",      "falcon",  80.0, hidden_dim=8192,
-               encoding_strategy="sparse", enabled=False, tags=["frontier"],
-               quirks=["MQA (not GQA) — verify hidden_size=8192 matches Llama-70B cluster",
-                       "Fits H200 bf16 (~80GB of 141GB)"]),
-
-    # Llama 3.1 70B — Meta, RoPE, GQA, SwiGLU, 80 layers
-    ModelEntry("meta-llama/Llama-3.1-70B", "llama3", 140.0, hidden_dim=8192,
-               encoding_strategy="sparse", enabled=False, gated=True, tags=["frontier"],
-               quirks=["Requires 8-bit on H200 (~70GB of 141GB)", "HF license required"]),
-
-    # Qwen 2.5 72B — Alibaba, RoPE, GQA, SwiGLU, 80 layers
-    ModelEntry("Qwen/Qwen2.5-72B",        "qwen2",  144.0, hidden_dim=8192,
-               encoding_strategy="sparse", enabled=False, tags=["frontier"],
-               quirks=["Requires 8-bit on H200 (~72GB of 141GB)"]),
-
-    # ── Instruct variants (RLHF / alignment-tuned) ──
-    # Same weights + architecture as base, with RLHF/DPO fine-tuning.
-    # For RLHF feature destruction audit: diff feature maps base vs instruct.
-
-    # ── Instruct variants (RLHF / alignment-tuned) ──
-    # Disabled by default — not included in --all runs.
-    # Use models_by_tag("instruct") or instruct_pairs() to query.
-
-    # Qwen 2.5 Instruct
-    ModelEntry("Qwen/Qwen2.5-0.5B-Instruct", "qwen2-instruct", 1.0,  hidden_dim=896,
-               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-    ModelEntry("Qwen/Qwen2.5-1.5B-Instruct", "qwen2-instruct", 3.1,  hidden_dim=1536,
-               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-    ModelEntry("Qwen/Qwen2.5-3B-Instruct",   "qwen2-instruct", 6.2,  hidden_dim=2048,
-               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-    ModelEntry("Qwen/Qwen2.5-7B-Instruct",   "qwen2-instruct", 14.5, hidden_dim=3584,
-               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-
-    # Gemma 2 IT (instruction-tuned)
-    ModelEntry("google/gemma-2-2b-it", "gemma2-instruct", 5.1,  hidden_dim=2304,
-               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-    ModelEntry("google/gemma-2-9b-it", "gemma2-instruct", 18.5, hidden_dim=3584,
-               encoding_strategy="sparse", enabled=False, tags=["instruct"],
-               quirks=["Use device_map='auto' across 2x L4"]),
-
-    # Llama 3.2 Instruct
-    ModelEntry("meta-llama/Llama-3.2-1B-Instruct", "llama3-instruct", 2.4,  hidden_dim=2048,
-               encoding_strategy="sparse", enabled=False, gated=True, tags=["instruct"]),
-    ModelEntry("meta-llama/Llama-3.2-3B-Instruct", "llama3-instruct", 6.4,  hidden_dim=3072,
-               encoding_strategy="sparse", enabled=False, gated=True, tags=["instruct"]),
-
-    # Mistral Instruct
-    ModelEntry("mistralai/Mistral-7B-Instruct-v0.3", "mistral-instruct", 14.5, hidden_dim=4096,
-               encoding_strategy="sparse", enabled=False, tags=["instruct"]),
-]
-
-
-# ---------------------------------------------------------------------------
-# Concepts
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ConceptEntry:
-    """One concept probe in the registry."""
     name: str
-    category: str  # epistemic, syntactic, relational, affective
-    dataset_file: str  # filename in consensus_pairs/
-    mean_assembly_depth_pct: float  # from 22-model scaling study
-    assembly_depth_std: float  # cross-model standard deviation
-
-
-CONCEPTS: list[ConceptEntry] = [
-    ConceptEntry("credibility",    "epistemic",   "credibility_consensus_pairs.jsonl",    39.6, 29.7),
-    ConceptEntry("negation",       "syntactic",   "negation_consensus_pairs.jsonl",       49.8, 17.3),
-    ConceptEntry("causation",      "relational",  "causation_consensus_pairs.jsonl",      53.6, 18.2),
-    ConceptEntry("temporal_order", "relational",  "temporal_order_consensus_pairs.jsonl",  56.1, 16.8),
-    ConceptEntry("sentiment",      "affective",   "sentiment_consensus_pairs.jsonl",      61.8, 13.6),
-    ConceptEntry("certainty",      "epistemic",   "certainty_consensus_pairs.jsonl",      64.2, 14.2),
-    ConceptEntry("moral_valence",  "affective",   "moral_valence_consensus_pairs.jsonl",  68.1, 14.1),
-]
+    category: str                # epistemic | syntactic | relational | affective | security
+    pipelines: list[str]         # caz | cia
+    assembly_depth_pct: float | None
+    assembly_depth_std: float | None
+    notes: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Convenience accessors — Models
+# YAML loading
 # ---------------------------------------------------------------------------
 
-def all_models(include_disabled: bool = False) -> list[str]:
-    """Return model IDs for all enabled models (or all if include_disabled)."""
-    return [m.model_id for m in REGISTRY if include_disabled or m.enabled]
+def _load_yaml(filename: str) -> Any:
+    try:
+        ref = importlib.resources.files("rosetta_tools.data").joinpath(filename)
+        return yaml.safe_load(ref.read_text())
+    except Exception:
+        # Fallback: path relative to this file
+        from pathlib import Path
+        p = Path(__file__).parent / "data" / filename
+        with open(p) as f:
+            return yaml.safe_load(f)
 
 
-def models_by_family(family: str) -> list[str]:
-    """Return enabled model IDs for a given family."""
-    return [m.model_id for m in REGISTRY if m.family == family and m.enabled]
+@lru_cache(maxsize=1)
+def _model_registry() -> list[ModelEntry]:
+    data = _load_yaml("models.yaml")
+    entries = []
+    for m in data["models"]:
+        entries.append(ModelEntry(
+            model_id=m["model_id"],
+            family=m["family"],
+            hidden_dim=m["hidden_dim"],
+            n_layers=m["n_layers"],
+            vram_bf16=m["vram_bf16"],
+            cluster=m.get("cluster"),
+            encoding=m.get("encoding", "unknown"),
+            attention=m.get("attention", "unknown"),
+            quantization=m.get("quantization"),
+            enabled=m.get("enabled", True),
+            gated=m.get("gated", False),
+            tags=m.get("tags") or [],
+            notes=m.get("notes") or "",
+        ))
+    return entries
 
 
-def families() -> dict[str, list[str]]:
-    """Return {family_name: [model_ids]} for all enabled models."""
-    result: dict[str, list[str]] = {}
-    for m in REGISTRY:
-        if m.enabled:
-            result.setdefault(m.family, []).append(m.model_id)
-    return result
+@lru_cache(maxsize=1)
+def _concept_registry() -> list[ConceptEntry]:
+    data = _load_yaml("concepts.yaml")
+    entries = []
+    for c in data["concepts"]:
+        entries.append(ConceptEntry(
+            name=c["name"],
+            category=c["category"],
+            pipelines=c.get("pipelines") or [],
+            assembly_depth_pct=c.get("assembly_depth_pct"),
+            assembly_depth_std=c.get("assembly_depth_std"),
+            notes=c.get("notes") or "",
+        ))
+    return entries
 
 
-def vram_gb(model_id: str) -> float:
-    """Return approximate bf16 VRAM usage in GB."""
-    for m in REGISTRY:
-        if m.model_id == model_id:
-            return m.vram_gb
-    return 0.0
-
-
-def family_of(model_id: str) -> str:
-    """Return family name for a model ID."""
-    for m in REGISTRY:
-        if m.model_id == model_id:
-            return m.family
-    return "unknown"
-
+# ---------------------------------------------------------------------------
+# Model queries
+# ---------------------------------------------------------------------------
 
 def get_model(model_id: str) -> ModelEntry | None:
-    """Look up a model entry by ID."""
-    for m in REGISTRY:
+    for m in _model_registry():
         if m.model_id == model_id:
             return m
     return None
 
 
-def encoding_strategy_of(model_id: str) -> str:
-    """Return encoding strategy ('redundant' | 'sparse' | 'unknown') for a model."""
-    m = get_model(model_id)
-    return m.encoding_strategy if m is not None else "unknown"
+def all_models(include_disabled: bool = False) -> list[str]:
+    return [m.model_id for m in _model_registry()
+            if include_disabled or m.enabled]
+
+
+def models_by_cluster(cluster: str, include_disabled: bool = False) -> list[str]:
+    """Return model IDs in a named PRH cluster (A/B/C/D/E/F/G/scale)."""
+    return [m.model_id for m in _model_registry()
+            if m.cluster == cluster and (include_disabled or m.enabled)]
+
+
+def models_by_family(family: str, include_disabled: bool = False) -> list[str]:
+    return [m.model_id for m in _model_registry()
+            if m.family == family and (include_disabled or m.enabled)]
+
+
+def families(include_disabled: bool = False) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for m in _model_registry():
+        if include_disabled or m.enabled:
+            result.setdefault(m.family, []).append(m.model_id)
+    return result
+
+
+def models_by_tag(tag: str, include_disabled: bool = False) -> list[str]:
+    return [m.model_id for m in _model_registry()
+            if tag in m.tags and (include_disabled or m.enabled)]
 
 
 def models_by_encoding(strategy: str, include_disabled: bool = False) -> list[str]:
-    """Return model IDs with the given encoding strategy."""
-    return [m.model_id for m in REGISTRY
-            if m.encoding_strategy == strategy and (include_disabled or m.enabled)]
-
-
-def hidden_dim_of(model_id: str) -> int:
-    """Return hidden dimension for a model (0 if unknown)."""
-    m = get_model(model_id)
-    return m.hidden_dim if m is not None else 0
+    return [m.model_id for m in _model_registry()
+            if m.encoding == strategy and (include_disabled or m.enabled)]
 
 
 def models_by_hidden_dim(dim: int, include_disabled: bool = False) -> list[str]:
-    """Return model IDs with the given hidden dimension.
-
-    Useful for finding zero-PCA pairs: models at the same hidden_dim
-    can be compared by Procrustes without any dimensionality reduction.
-    """
-    return [m.model_id for m in REGISTRY
+    return [m.model_id for m in _model_registry()
             if m.hidden_dim == dim and (include_disabled or m.enabled)]
 
 
 def zero_pca_clusters(include_disabled: bool = False) -> dict[int, list[str]]:
-    """Return {hidden_dim: [model_ids]} for dims with 2+ models.
-
-    Each entry is a set of models that can be compared without PCA.
-    Only includes dims with at least 2 models (otherwise no pairs exist).
-    """
+    """Return {hidden_dim: [model_ids]} for dims with 2+ models (Procrustes pairs)."""
     from collections import defaultdict
     by_dim: dict[int, list[str]] = defaultdict(list)
-    for m in REGISTRY:
+    for m in _model_registry():
         if m.hidden_dim > 0 and (include_disabled or m.enabled):
             by_dim[m.hidden_dim].append(m.model_id)
     return {dim: ids for dim, ids in sorted(by_dim.items()) if len(ids) >= 2}
 
 
-def models_by_tag(tag: str, include_disabled: bool = False) -> list[str]:
-    """Return model IDs that have a given tag."""
-    return [m.model_id for m in REGISTRY
-            if tag in m.tags and (include_disabled or m.enabled)]
+def vram_gb(model_id: str) -> float:
+    m = get_model(model_id)
+    return m.vram_bf16 if m is not None else 0.0
 
 
-# ---------------------------------------------------------------------------
-# Attention paradigm classification
-# ---------------------------------------------------------------------------
+def family_of(model_id: str) -> str:
+    m = get_model(model_id)
+    return m.family if m is not None else "unknown"
 
-ALTERNATING_FAMILIES = frozenset({"gemma2", "gemma2-instruct"})
+
+def hidden_dim_of(model_id: str) -> int:
+    m = get_model(model_id)
+    return m.hidden_dim if m is not None else 0
 
 
 def attention_paradigm_of(model_id: str) -> str:
-    """Return attention paradigm for a model.
-
-    Determines how much Fisher-based separation predicts functional
-    importance, per the ablation calibration study (tc17bb65):
-
-    'mha'         — Multi-head attention (GPT-2, Pythia, OPT, Phi).
-                    Fisher separation strongly predicts functional importance
-                    (sep_reduction=0.704, patching_recovery=0.753).
-    'gqa'         — Grouped-query attention (Qwen, Llama, Mistral).
-                    Fisher separation is a partial proxy for function
-                    (sep_reduction=0.018, patching_recovery=0.653).
-    'alternating' — Sliding-window + global attention alternating (Gemma-2).
-                    Fisher peaks are geometric artifacts ('black holes');
-                    functional peak is the final global attention layer
-                    (sep_reduction=0.000, patching_recovery=~1.0 at final
-                    global layer vs 0.461 at Fisher peak).
-    'unknown'     — Not yet classified.
-    """
+    """Return attention paradigm: 'mha' | 'gqa' | 'alternating' | 'unknown'."""
     m = get_model(model_id)
-    if m is None:
-        return "unknown"
-    if m.family in ALTERNATING_FAMILIES:
-        return "alternating"
-    if m.encoding_strategy == "redundant":
-        return "mha"
-    if m.encoding_strategy == "sparse":
-        return "gqa"
-    return "unknown"
+    return m.attention if m is not None else "unknown"
+
+
+def requires_quantization(model_id: str) -> str | None:
+    """Return required quantization ('4bit' | '8bit') or None."""
+    m = get_model(model_id)
+    return m.quantization if m is not None else None
 
 
 def instruct_pairs(include_disabled: bool = False) -> list[tuple[str, str]]:
-    """Return (base_model_id, instruct_model_id) pairs.
-
-    Matches families by name: 'foo' pairs with 'foo-instruct'.
-    Only returns pairs where both base and instruct are enabled
-    (or all if include_disabled).
-    """
-    base_by_family: dict[str, list[ModelEntry]] = {}
-    inst_by_family: dict[str, list[ModelEntry]] = {}
-    for m in REGISTRY:
+    """Return (base_model_id, instruct_model_id) pairs matched by family+size."""
+    base_by_key: dict[tuple[str, float], ModelEntry] = {}
+    inst_by_key: dict[tuple[str, float], ModelEntry] = {}
+    for m in _model_registry():
         if not include_disabled and not m.enabled:
             continue
-        if m.family.endswith("-instruct"):
-            inst_by_family.setdefault(m.family.removesuffix("-instruct"), []).append(m)
+        if "rlhf-pair" not in m.tags:
+            continue
+        key = (m.family.removesuffix("-instruct"), m.vram_bf16)
+        if "instruct" in m.tags:
+            inst_by_key[key] = m
         else:
-            base_by_family.setdefault(m.family, []).append(m)
+            base_by_key[key] = m
 
     pairs = []
-    for fam, bases in base_by_family.items():
-        instructs = inst_by_family.get(fam, [])
-        # Match by VRAM (same size = same model, different tuning)
-        inst_by_vram = {m.vram_gb: m for m in instructs}
-        for b in bases:
-            if b.vram_gb in inst_by_vram:
-                pairs.append((b.model_id, inst_by_vram[b.vram_gb].model_id))
+    for key, base in base_by_key.items():
+        if key in inst_by_key:
+            pairs.append((base.model_id, inst_by_key[key].model_id))
     return pairs
 
 
 # ---------------------------------------------------------------------------
-# Convenience accessors — Concepts
+# Concept queries
 # ---------------------------------------------------------------------------
 
-def concept_names() -> list[str]:
-    """Return all concept names in assembly order (shallow to deep)."""
-    return [c.name for c in CONCEPTS]
+def get_concept(name: str) -> ConceptEntry | None:
+    for c in _concept_registry():
+        if c.name == name:
+            return c
+    return None
 
 
-def concept_datasets() -> dict[str, str]:
-    """Return {concept_name: dataset_filename}."""
-    return {c.name: c.dataset_file for c in CONCEPTS}
+def all_concepts() -> list[str]:
+    return [c.name for c in _concept_registry()]
+
+
+def concepts_by_pipeline(pipeline: str) -> list[str]:
+    """Return concept names for a pipeline ('caz' or 'cia')."""
+    return [c.name for c in _concept_registry() if pipeline in c.pipelines]
 
 
 def concepts_by_category(category: str) -> list[str]:
-    """Return concept names for a given category."""
-    return [c.name for c in CONCEPTS if c.category == category]
+    return [c.name for c in _concept_registry() if c.category == category]
+
+
+def concept_assembly_depths() -> dict[str, float]:
+    """Return {concept: mean_assembly_depth_pct} for measured concepts only."""
+    return {c.name: c.assembly_depth_pct
+            for c in _concept_registry()
+            if c.assembly_depth_pct is not None}
