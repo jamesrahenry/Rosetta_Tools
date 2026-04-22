@@ -331,31 +331,15 @@ models:
     notes: "~16GB at nf4. 64 layers is the deepest in the L4-runnable set."
 
   # ===========================================================================
-  # CLUSTER G — Gemma 4  (new; hidden_dims TBD — verify from model configs)
-  # MoE vs dense at same family. Both gated, both need 4-bit.
-  # Alternating attention paradigm expected (same as Gemma 2).
-  # NOTE: hidden_dim may differ between MoE and dense — update cluster
-  #       assignment once confirmed from config.json on HuggingFace.
+  # CLUSTER G — 5376-dim  (Gemma 4 dense)
+  # gemma-4-31B-it is the sole member — no zero-PCA pair at this dim yet.
+  # Alternating attention paradigm (same as Gemma 2). Gated, needs 4-bit.
   # ===========================================================================
-
-  - model_id: google/gemma-4-26B-A4B-it
-    family: gemma4
-    hidden_dim: 5376
-    n_layers: 46
-    vram_bf16: 55.0
-    cluster: G
-    encoding: sparse
-    attention: alternating
-    quantization: 4bit
-    enabled: true
-    gated: true
-    tags: [moe, instruct, rlhf-pair]
-    notes: "Gemma4 MoE, 26B total / ~4B active per token. ~15GB at nf4. Gated. hidden_dim TBD."
 
   - model_id: google/gemma-4-31B-it
     family: gemma4
-    hidden_dim: 7168
-    n_layers: 62
+    hidden_dim: 5376
+    n_layers: 60
     vram_bf16: 62.0
     cluster: G
     encoding: sparse
@@ -364,7 +348,27 @@ models:
     enabled: true
     gated: true
     tags: [instruct, rlhf-pair]
-    notes: "Gemma4 dense 31B. ~16GB at nf4. Gated. hidden_dim/n_layers TBD — verify from config."
+    notes: "Gemma4 dense 31B. ~16GB at nf4. Gated. No zero-PCA pair at 5376-dim."
+
+  # ===========================================================================
+  # CLUSTER H — 2816-dim  (Gemma 4 MoE)
+  # gemma-4-26B-A4B-it: 128 experts, top-8 active per token, hidden_dim=2816.
+  # Different dim from the dense 31B — separate cluster.
+  # ===========================================================================
+
+  - model_id: google/gemma-4-26B-A4B-it
+    family: gemma4
+    hidden_dim: 2816
+    n_layers: 30
+    vram_bf16: 52.0
+    cluster: H
+    encoding: sparse
+    attention: alternating
+    quantization: 4bit
+    enabled: true
+    gated: true
+    tags: [moe, instruct, rlhf-pair]
+    notes: "Gemma4 MoE, 128 experts / top-8 active, hidden_dim=2816. ~13GB at nf4. Gated."
 
   # ===========================================================================
   # CLUSTER F — 8192-dim  (frontier, H200 only)
@@ -711,9 +715,9 @@ models:
 
   - model_id: google/gemma-4-26B-A4B
     family: gemma4
-    hidden_dim: 5376
-    n_layers: 46
-    vram_bf16: 55.0
+    hidden_dim: 2816
+    n_layers: 30
+    vram_bf16: 52.0
     cluster: null
     encoding: sparse
     attention: alternating
@@ -721,12 +725,12 @@ models:
     enabled: false
     gated: true
     tags: [moe, rlhf-pair]
-    notes: "Base variant of gemma-4-26B-A4B-it. Disabled — rlhf-pair reference only. hidden_dim TBD."
+    notes: "Base variant of gemma-4-26B-A4B-it. Disabled — rlhf-pair reference only."
 
   - model_id: google/gemma-4-31B
     family: gemma4
-    hidden_dim: 7168
-    n_layers: 62
+    hidden_dim: 5376
+    n_layers: 60
     vram_bf16: 62.0
     cluster: null
     encoding: sparse
@@ -735,4 +739,4 @@ models:
     enabled: false
     gated: true
     tags: [rlhf-pair]
-    notes: "Base variant of gemma-4-31B-it. Disabled — rlhf-pair reference only. hidden_dim/n_layers TBD."
+    notes: "Base variant of gemma-4-31B-it. Disabled — rlhf-pair reference only."
