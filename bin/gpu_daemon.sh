@@ -56,8 +56,9 @@ purge_hf_cache() {
 }
 
 sync_repos() {
-    local repos=("$HOME/semantic_convergence" "$HOME/rosetta_tools")
+    local repos=("$HOME/rosetta_tools" "$HOME/rosetta_analysis")
     for repo in "${repos[@]}"; do
+        [[ -d "$repo/.git" ]] || { [[ -L "$repo" ]] && repo=$(readlink -f "$repo"); } || continue
         [[ -d "$repo/.git" ]] || continue
         if git -C "$repo" pull --ff-only --autostash --quiet 2>/dev/null; then
             log "  pulled $(basename $repo)"
