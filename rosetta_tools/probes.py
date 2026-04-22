@@ -48,6 +48,14 @@ log = logging.getLogger(__name__)
 PeakMethod = Literal["raw", "fisher", "auroc"]
 ThresholdStrategy = Literal["midpoint", "target_tpr"]
 
+# Two fundamentally different concept types that require different probe strategies:
+#   "semantic"      — concept assembles through transformer layers via CAZ dynamics;
+#                     probe at the GEM handoff layer (settled direction).
+#   "tokenization"  — signal lives at BPE/embedding level (encoding artifacts,
+#                     script/language, byte patterns); no meaningful CAZ; use raw
+#                     or auroc layer selection.
+ConceptType = Literal["semantic", "tokenization"]
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -68,6 +76,7 @@ class ProbeResult:
     auroc: float = 0.0
     n_pos: int = 0
     n_neg: int = 0
+    probe_type: str = "raw"  # "raw" | "fisher" | "auroc" | "gem" | "raw_fallback"
 
 
 # ---------------------------------------------------------------------------
@@ -326,4 +335,137 @@ def extract_probe(
         auroc=round(auroc, 4),
         n_pos=n_pos,
         n_neg=n_neg,
+        probe_type=method,
+    )
+
+
+def extract_gem_probe(
+    layer_activations: list[tuple[NDArray, NDArray]],
+    eval_frac: float = 0.2,
+    seed: int = 42,
+    concept: str = "",
+    attention_paradigm: str = "unknown",
+) -> ProbeResult:
+    """Extract a probe using GEM handoff layer and settled direction.
+
+    For semantic concepts whose signal assembles through transformer layers
+    via CAZ dynamics.  Identifies the dominant CAZ region, takes the
+    difference-of-means direction at the CAZ end (the settled assembly
+    product), and scores at the handoff layer (CAZ end + 1).
+
+    This is more principled than ``extract_probe(method='raw')`` for
+    semantic concepts because it scores after the rotation completes rather
+    than at the noisiest mid-assembly point.
+
+    Falls back to ``method='raw'`` if no CAZ regions are found.
+
+    Parameters
+    ----------
+    layer_activations:
+        List of ``(pos_acts, neg_acts)`` tuples, one per layer.
+    eval_frac:
+        Fraction held out for honest AUROC estimation (default 0.2).
+    seed:
+        Random seed for train/eval split.
+    concept:
+        Concept name stored in the result.
+    attention_paradigm:
+        Passed to ``find_caz_regions_scored`` for architecture-aware
+        threshold calibration.
+
+    Returns
+    -------
+    ProbeResult
+        ``probe_type='gem'``.  ``layer`` is the handoff layer.
+        ``sep_curve`` uses per-layer raw separation (same scale as
+        ``method='raw'``) so CAZ visualization works unchanged.
+    """
+    from rosetta_tools.caz import compute_layer_metrics, find_caz_regions_scored
+
+    n_layers = len(layer_activations)
+    if n_layers == 0:
+        raise ValueError("layer_activations is empty")
+
+    # Build CAZ profile
+    layer_metrics = compute_layer_metrics(layer_activations)
+    profile = find_caz_regions_scored(layer_metrics, attention_paradigm=attention_paradigm)
+
+    # Fallback: no CAZ structure detected (tokenization-level concept, noisy model)
+    if profile.n_regions == 0:
+        log.warning(
+            "extract_gem_probe: no CAZ regions found for %r — falling back to raw",
+            concept,
+        )
+        result = extract_probe(
+            layer_activations, method="raw", eval_frac=eval_frac, seed=seed, concept=concept
+        )
+        result.probe_type = "raw_fallback"
+        return result
+
+    dom = profile.dominant
+
+    # Train/eval split
+    n_pos = len(layer_activations[0][0])
+    n_neg = len(layer_activations[0][1])
+
+    if eval_frac > 0:
+        pos_train, neg_train, pos_eval, neg_eval = _split_indices(
+            n_pos, n_neg, eval_frac, seed
+        )
+    else:
+        pos_train = np.arange(n_pos)
+        neg_train = np.arange(n_neg)
+        pos_eval = pos_train
+        neg_eval = neg_train
+
+    # Settled direction: DoM at CAZ end (assembly product)
+    pos_end, neg_end = layer_activations[dom.end]
+    direction = _dom_direction(pos_end[pos_train], neg_end[neg_train])
+
+    # Handoff layer: one past CAZ end, clamped
+    handoff_layer = min(dom.end + 1, n_layers - 1)
+
+    # Sep curve: per-layer raw separation for CAZ visualization
+    sep_curve = np.array([
+        _raw_separation(pa[pos_train], na[neg_train])
+        for pa, na in layer_activations
+    ])
+
+    # Scores at handoff layer
+    pos_h, neg_h = layer_activations[handoff_layer]
+    pos_scores = score_direction(pos_h[pos_eval], direction)
+    neg_scores = score_direction(neg_h[neg_eval], direction)
+
+    pos_mean = float(np.mean(pos_scores))
+    neg_mean = float(np.mean(neg_scores))
+    threshold = (pos_mean + neg_mean) / 2.0
+
+    # AUROC
+    all_scores = np.concatenate([pos_scores, neg_scores])
+    all_labels = np.array([1] * len(pos_scores) + [0] * len(neg_scores))
+    try:
+        from sklearn.metrics import roc_auc_score
+        auroc = float(roc_auc_score(all_labels, all_scores))
+    except (ValueError, ImportError):
+        auroc = 0.0
+
+    log.info(
+        "  %s  GEM  settled@L%d → handoff L%d  |  threshold %.3f  "
+        "(pos %.3f / neg %.3f)  AUROC %.3f",
+        concept or "(unnamed)", dom.end, handoff_layer,
+        threshold, pos_mean, neg_mean, auroc,
+    )
+
+    return ProbeResult(
+        concept=concept,
+        layer=handoff_layer,
+        direction=direction.astype(np.float32),
+        threshold=round(threshold, 4),
+        sep_curve=sep_curve,
+        pos_mean=round(pos_mean, 4),
+        neg_mean=round(neg_mean, 4),
+        auroc=round(auroc, 4),
+        n_pos=n_pos,
+        n_neg=n_neg,
+        probe_type="gem",
     )

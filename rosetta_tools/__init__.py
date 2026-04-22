@@ -7,6 +7,10 @@ gpu_utils   Device selection, dtype resolution, VRAM reporting, model teardown.
 extraction  Model-agnostic layer activation extraction (HF AutoModel).
 caz         CAZ metric computation — separation, coherence, velocity, boundary detection.
 probes      Probe extraction from contrastive activations — layer selection, direction, threshold.
+            extract_probe() for raw/fisher/auroc layer selection; extract_gem_probe() for
+            semantic concepts (GEM handoff layer + settled direction).  ProbeResult carries
+            probe_type ("gem" | "raw" | "auroc" | "raw_fallback") and ConceptType annotation
+            distinguishes semantic (CAZ-assembled) from tokenization-level concepts.
 alignment   Orthogonal Procrustes alignment for cross-architecture vector comparison.
 ablation    Directional ablation hooks for HF AutoModel (mid-stream hypothesis testing).
 dataset     Dataset loading, validation, and pair iteration utilities.
