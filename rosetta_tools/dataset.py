@@ -7,31 +7,130 @@ negative class) with fields: pair_id, label, domain, model_name, text, topic.
 
 Typical usage
 -------------
-    from rosetta_tools.dataset import load_pairs, iter_texts, validate_dataset
+    from rosetta_tools.dataset import load_pairs, load_concept_pairs
 
+    # High-level: canonical data root, split-aware, sampled
+    pairs = load_concept_pairs("causation", n=200, split="train")
+
+    # Low-level: load a specific file directly
     pairs = load_pairs("data/credibility_pairs.jsonl")
-    print(f"Loaded {len(pairs)} pairs")
-
-    # Iterate positive and negative texts together
-    for pos_text, neg_text, meta in iter_texts(pairs):
-        ...
-
-    # Validate before a long run
-    issues = validate_dataset("data/negation_pairs.jsonl")
-    if issues:
-        raise ValueError(f"Dataset issues: {issues}")
 """
 
 from __future__ import annotations
 
 import json
+import os
+import random
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Iterator, Literal
 
 if TYPE_CHECKING:
     import pandas as pd
+
+# ---------------------------------------------------------------------------
+# Canonical concept registry
+# ---------------------------------------------------------------------------
+
+# Concepts valid for PRH/CAZ analysis — obfuscation excluded because its
+# positive class is tokenisation-encoded text (leet/base64/homoglyphs),
+# not a semantic contrast.  It lives in the CIA pipeline only.
+CAZ_PRH_CONCEPTS: list[str] = [
+    "agency", "authorization", "causation", "certainty", "credibility",
+    "deception", "exfiltration", "formality", "moral_valence", "negation",
+    "plurality", "sarcasm", "sentiment", "specificity", "temporal_order",
+    "threat_severity", "urgency",
+]
+
+# All 18 concepts including CIA-only ones
+ALL_CONCEPTS: list[str] = CAZ_PRH_CONCEPTS + ["obfuscation"]
+
+_SPLIT_FILE_NAME = "v1_validation_split.json"
+
+
+def _concepts_root() -> Path:
+    """Resolve canonical data root from env or repo-relative fallback."""
+    env = os.environ.get("ROSETTA_CONCEPTS_ROOT")
+    if env:
+        p = Path(env)
+        if p.exists():
+            return p
+    # Walk up from this file to find Rosetta_Program root
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "Rosetta_Concept_Pairs" / "pairs" / "raw" / "v1"
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "Cannot locate Rosetta_Concept_Pairs/pairs/raw/v1/. "
+        "Set ROSETTA_CONCEPTS_ROOT to the directory containing *_consensus_pairs.jsonl files."
+    )
+
+
+def _load_split() -> dict[str, dict[str, list[str]]]:
+    """Load the fixed validation split from metadata."""
+    root = _concepts_root()
+    split_path = root.parent.parent.parent / "metadata" / _SPLIT_FILE_NAME
+    if not split_path.exists():
+        raise FileNotFoundError(
+            f"Validation split not found: {split_path}. "
+            "Run Rosetta_Concept_Pairs/generate_split.py to create it."
+        )
+    with open(split_path) as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# High-level entry point
+# ---------------------------------------------------------------------------
+
+
+def load_concept_pairs(
+    concept: str,
+    *,
+    split: Literal["train", "validation", "all"] = "train",
+    n: int = 200,
+    seed: int | None = None,
+) -> list["ConceptPair"]:
+    """Load up to *n* pairs for *concept* from the canonical dataset.
+
+    Parameters
+    ----------
+    concept:
+        One of the entries in ``CAZ_PRH_CONCEPTS`` or ``ALL_CONCEPTS``.
+    split:
+        ``"train"`` (default) — pair_ids in the fixed 80% training split.
+        ``"validation"`` — held-out 20% split, never used in extraction.
+        ``"all"`` — all pair_ids (use for CIA probe building only).
+    n:
+        Maximum pairs to return (250 pos + 250 neg up to *n*).
+        Silently clamped to however many are available — no error.
+    seed:
+        Random seed for sampling.  ``None`` uses a deterministic seed
+        derived from ``(concept, split)`` for reproducibility without
+        requiring callers to manage seeds.
+    """
+    root = _concepts_root()
+    path = root / f"{concept}_consensus_pairs.jsonl"
+    all_pairs = load_pairs(path)
+
+    if split != "all":
+        split_map = _load_split()
+        if concept not in split_map:
+            raise KeyError(f"Concept '{concept}' not found in validation split.")
+        allowed = set(split_map[concept][split])
+        # pair_id in ConceptPair is composite "base_id__model_name"; extract base
+        all_pairs = [
+            p for p in all_pairs
+            if p.pair_id.split("__")[0] in allowed
+        ]
+
+    if len(all_pairs) <= n:
+        return all_pairs
+
+    rng = random.Random(seed if seed is not None else hash((concept, split)) & 0xFFFFFFFF)
+    return rng.sample(all_pairs, n)
 
 
 # ---------------------------------------------------------------------------
