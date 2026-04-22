@@ -13,6 +13,9 @@ dataset     Dataset loading, validation, and pair iteration utilities.
             load_concept_pairs() is the primary entry point — resolves the
             canonical Rosetta_Concept_Pairs root, applies the fixed train/val
             split, and samples up to N pairs (default 200, clamped).
+gem         Geometric Evolution Map (GEM) — reified CAZ assembly events for
+            zone-level ablation.  EigThread, GEMNode, ConceptGEM dataclasses;
+            build_concept_gem(), save_gem(), load_gem(), gem_diagnostics().
 reporting   Pandas-based result loading — tidy DataFrames from JSON checkpoints.
 viz         Matplotlib helpers — CAZ profiles, multi-concept overlays, peak heatmaps.
 """
