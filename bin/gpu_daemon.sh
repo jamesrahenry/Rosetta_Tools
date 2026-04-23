@@ -231,7 +231,12 @@ run_job() {
         sync_hopper
     fi
 
-    purge_hf_cache
+    local avail_post; avail_post=$(free_gib)
+    if [[ "$avail_post" -lt "$MIN_DISK_GIB" ]]; then
+        purge_hf_cache
+    else
+        log "HF cache retained — ${avail_post} GiB free (threshold: ${MIN_DISK_GIB} GiB)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
