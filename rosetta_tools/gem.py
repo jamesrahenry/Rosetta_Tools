@@ -52,7 +52,7 @@ from rosetta_tools.caz import (
 
 log = logging.getLogger(__name__)
 
-_MODELS_ROOT = Path.home() / "rosetta_data" / "models"
+from rosetta_tools.paths import ROSETTA_MODELS as _MODELS_ROOT
 
 
 def _model_slug(model_id: str) -> str:

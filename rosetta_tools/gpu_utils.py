@@ -584,3 +584,41 @@ def load_model_with_retry(
         return model_cls.from_pretrained(
             model_id, dtype=dtype, local_files_only=True,
         ).to(device)
+
+
+def load_causal_lm(
+    model_id: str,
+    device: str,
+    dtype,
+    *,
+    device_map: str | None = None,
+    load_in_8bit: bool = False,
+    trust_remote_code: bool = False,
+) -> tuple:
+    """Load a causal LM and its tokenizer, returning (model, tokenizer).
+
+    Wraps load_model_with_retry for reliable downloads, applies the
+    device_map/dtype fallback pattern, sets pad_token if missing, and
+    puts the model in eval mode.  Covers all patterns seen across scripts:
+    plain dtype, device_map=auto, 8-bit quantization, trust_remote_code.
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tok_kwargs: dict = {}
+    if trust_remote_code:
+        tok_kwargs["trust_remote_code"] = True
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id, **tok_kwargs)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = load_model_with_retry(
+        AutoModelForCausalLM,
+        model_id,
+        dtype=dtype,
+        device=device,
+        device_map=device_map,
+        load_in_8bit=load_in_8bit,
+    )
+    model.eval()
+    return model, tokenizer
