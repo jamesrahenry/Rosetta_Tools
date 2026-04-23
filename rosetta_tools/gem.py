@@ -52,6 +52,64 @@ from rosetta_tools.caz import (
 
 log = logging.getLogger(__name__)
 
+_MODELS_ROOT = Path.home() / "rosetta_data" / "models"
+
+
+def _model_slug(model_id: str) -> str:
+    return model_id.replace("/", "_").replace("-", "_")
+
+
+def find_extraction_dir(model_id: str, models_root: Path | None = None) -> Path | None:
+    """Return the extraction directory for a model, or None if not found."""
+    root = models_root or _MODELS_ROOT
+    d = root / _model_slug(model_id)
+    return d if d.is_dir() and (d / "run_summary.json").exists() else None
+
+
+def discover_concepts(extraction_dir: Path, source: str = "gem") -> list[str]:
+    """Return sorted concept names from gem_*.json (source='gem') or caz_*.json (source='caz')."""
+    prefix = f"{source}_"
+    return sorted(p.stem[len(prefix):] for p in extraction_dir.glob(f"{prefix}*.json"))
+
+
+def discover_all_models(models_root: Path | None = None) -> list[str]:
+    """Return sorted model IDs for all models with extraction results (including instruct)."""
+    root = models_root or _MODELS_ROOT
+    models: list[str] = []
+    if not root.exists():
+        return models
+    for d in root.iterdir():
+        s = d / "run_summary.json"
+        if not s.exists():
+            continue
+        try:
+            mid = json.loads(s.read_text()).get("model_id", "")
+            if mid:
+                models.append(mid)
+        except Exception:
+            pass
+    return sorted(models)
+
+
+def discover_base_models(models_root: Path | None = None) -> list[str]:
+    """Return sorted model IDs for all base (non-instruct) models with extraction results."""
+    root = models_root or _MODELS_ROOT
+    models: set[str] = set()
+    if not root.exists():
+        return []
+    for d in root.iterdir():
+        s = d / "run_summary.json"
+        if not s.exists():
+            continue
+        try:
+            mid = json.loads(s.read_text()).get("model_id", "")
+            if mid and not any(t in mid for t in ["Instruct", "instruct", "-it"]):
+                models.add(mid)
+        except Exception:
+            pass
+    return sorted(models)
+
+
 
 # ---------------------------------------------------------------------------
 # Data classes
