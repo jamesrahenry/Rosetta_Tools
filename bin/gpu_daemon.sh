@@ -56,19 +56,48 @@ purge_hf_cache() {
 }
 
 sync_repos() {
-    local repos=("$HOME/rosetta_tools" "$HOME/rosetta_analysis" "$HOME/Rosetta_Concept_Pairs")
-    for repo in "${repos[@]}"; do
-        [[ -d "$repo/.git" ]] || { [[ -L "$repo" ]] && repo=$(readlink -f "$repo"); } || continue
+    # repo_path:clone_url pairs; rosetta_analysis is a symlink → Rosetta_Analysis
+    declare -A REPO_URLS=(
+        ["$HOME/rosetta_tools"]="https://github.com/jamesrahenry/rosetta_tools.git"
+        ["$HOME/Rosetta_Analysis"]="https://github.com/jamesrahenry/Rosetta_Analysis.git"
+        ["$HOME/Rosetta_Concept_Pairs"]="https://github.com/jamesrahenry/Rosetta_Concept_Pairs.git"
+    )
+
+    for repo in "${!REPO_URLS[@]}"; do
+        local url="${REPO_URLS[$repo]}"
+        local name; name=$(basename "$repo")
+
+        # Resolve symlink if path doesn't exist but a symlink target does
+        if [[ ! -d "$repo" && -L "$repo" ]]; then
+            repo=$(readlink -f "$repo")
+        fi
+
+        # Clone if missing
+        if [[ ! -d "$repo/.git" ]]; then
+            log "  Cloning $name from $url"
+            git clone --quiet "$url" "$repo" 2>/dev/null \
+                && log "  cloned $name" \
+                || log "  ⚠ clone failed: $name"
+        fi
+
         [[ -d "$repo/.git" ]] || continue
+
         if git -C "$repo" pull --ff-only --autostash --quiet 2>/dev/null; then
-            log "  pulled $(basename $repo)"
+            log "  pulled $name"
         else
-            log "  ⚠ pull skipped (diverged): $(basename $repo)"
+            log "  ⚠ pull skipped (diverged): $name"
         fi
         if [[ -f "$repo/pyproject.toml" ]]; then
-            pip install -q -e "$repo" 2>/dev/null && log "  reinstalled $(basename $repo)"
+            pip install -q -e "$repo" 2>/dev/null && log "  reinstalled $name"
         fi
     done
+
+    # Ensure ~/rosetta_analysis symlink exists
+    if [[ ! -e "$HOME/rosetta_analysis" && -d "$HOME/Rosetta_Analysis" ]]; then
+        ln -s "$HOME/Rosetta_Analysis" "$HOME/rosetta_analysis"
+        log "  created symlink rosetta_analysis → Rosetta_Analysis"
+    fi
+
     python -c "import rosetta_tools" 2>/dev/null || { log "rosetta_tools missing — installing"; pip install -q -e "$HOME/rosetta_tools"; }
 }
 
