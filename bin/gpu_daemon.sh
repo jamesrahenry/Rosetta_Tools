@@ -22,7 +22,8 @@ POLL_INTERVAL=30      # seconds between polls when idle
 LOG_DIR="${HOME}/gpu_runs"
 MIN_DISK_GIB=15
 MAX_RETRIES=2         # auto-retry failed jobs this many times before marking blocked
-RETRY_DELAY=60        # seconds to wait before re-queuing a failed job
+RETRY_DELAY=60        # seconds before re-queuing unknown/infrastructure failures
+RETRY_DELAY_FAST=15   # seconds before re-queuing transient network failures
 
 mkdir -p "$LOG_DIR"
 DAEMON_LOG="$LOG_DIR/daemon.log"
@@ -171,6 +172,44 @@ resolve_blocked() {
 }
 
 # ---------------------------------------------------------------------------
+# Failure classification — scan log to decide retry behaviour
+# Returns: "no_retry" | "retry_fast" | "retry_slow"
+# ---------------------------------------------------------------------------
+
+classify_failure() {
+    local log_file="$1"
+    [[ -f "$log_file" ]] || { echo "retry_slow"; return; }
+
+    # OOM — needs code change (batch size), not a re-run
+    if grep -q "OutOfMemoryError\|CUDA out of memory" "$log_file"; then
+        echo "no_retry"; return
+    fi
+
+    # Hard code/logic errors — re-running won't change the outcome
+    if grep -q "SyntaxError\|ImportError\|ModuleNotFoundError\|AttributeError\|TypeError\|NameError" "$log_file"; then
+        echo "no_retry"; return
+    fi
+
+    # Missing data — re-running won't produce the data
+    if grep -q "FileNotFoundError\|No GEM data\|No concept pairs\|concept.*not found\|No extraction dir" "$log_file"; then
+        echo "no_retry"; return
+    fi
+
+    # Transient network / download blip — retry quickly
+    if grep -q "ConnectTimeout\|ConnectionResetError\|ReadTimeout\|ChunkedEncodingError\|requests\.exceptions" "$log_file"; then
+        echo "retry_fast"; return
+    fi
+
+    # HF hub errors — could be rate-limit or transient 5xx, retry with delay
+    if grep -q "huggingface_hub\|RepositoryNotFoundError\|EntryNotFoundError\|HTTPError" "$log_file"; then
+        echo "retry_slow"; return
+    fi
+
+    # Default: unknown failure, retry with delay
+    echo "retry_slow"
+}
+
+# ---------------------------------------------------------------------------
 # Job runner
 # ---------------------------------------------------------------------------
 
@@ -245,17 +284,25 @@ run_job() {
         resolve_blocked
         sync_hopper
     else
+        local failure_type; failure_type=$(classify_failure "$log_file")
         local retries; retries=$(get_retry_count "$task_id")
-        if [[ "$retries" -lt "$MAX_RETRIES" ]]; then
+
+        if [[ "$failure_type" == "no_retry" ]]; then
+            log "✗ $task_id FAILED (exit=$exit_code, ${duration}, $failure_type) — not retrying — blocked — see $log_file"
+            hopper task status "$task_id" blocked -f
+            sync_hopper
+        elif [[ "$retries" -lt "$MAX_RETRIES" ]]; then
             local next=$(( retries + 1 ))
-            log "✗ $task_id FAILED (exit=$exit_code, ${duration}) — retry $next/$MAX_RETRIES in ${RETRY_DELAY}s — see $log_file"
+            local delay=$RETRY_DELAY
+            [[ "$failure_type" == "retry_fast" ]] && delay=$RETRY_DELAY_FAST
+            log "✗ $task_id FAILED (exit=$exit_code, ${duration}, $failure_type) — retry $next/$MAX_RETRIES in ${delay}s — see $log_file"
             set_retry_count "$task_id" "$next"
             sync_hopper
-            sleep "$RETRY_DELAY"
+            sleep "$delay"
             hopper task status "$task_id" open -f 2>/dev/null || true
             sync_hopper
         else
-            log "✗ $task_id FAILED (exit=$exit_code, ${duration}) — exhausted $MAX_RETRIES retries — blocked — see $log_file"
+            log "✗ $task_id FAILED (exit=$exit_code, ${duration}, $failure_type) — exhausted $MAX_RETRIES retries — blocked — see $log_file"
             hopper task status "$task_id" blocked -f
             sync_hopper
         fi
