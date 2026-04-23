@@ -21,6 +21,8 @@ IDENTITY="gpu:$(hostname)"
 POLL_INTERVAL=30      # seconds between polls when idle
 LOG_DIR="${HOME}/gpu_runs"
 MIN_DISK_GIB=15
+MAX_RETRIES=2         # auto-retry failed jobs this many times before marking blocked
+RETRY_DELAY=60        # seconds to wait before re-queuing a failed job
 
 mkdir -p "$LOG_DIR"
 DAEMON_LOG="$LOG_DIR/daemon.log"
@@ -108,11 +110,28 @@ get_full_description() {
 }
 
 get_command() {
-    get_full_description "$1" | sed 's/ *### depends:.*$//'
+    # Strip all ### markers (depends, retries, …) — they are always appended at the end
+    get_full_description "$1" | sed 's/ *### .*$//'
 }
 
 get_deps() {
     get_full_description "$1" | grep -o '### depends:[^ ]*' | sed 's/### depends://' || true
+}
+
+get_retry_count() {
+    get_full_description "$1" | grep -o '### retries:[0-9]*' | grep -o '[0-9]*' || echo 0
+}
+
+set_retry_count() {
+    local tid="$1" count="$2"
+    local desc; desc=$(get_full_description "$tid")
+    local new_desc
+    if echo "$desc" | grep -q '### retries:'; then
+        new_desc=$(echo "$desc" | sed "s/### retries:[0-9]*/### retries:$count/")
+    else
+        new_desc="$desc ### retries:$count"
+    fi
+    hopper task update "$tid" --description "$new_desc" 2>/dev/null || true
 }
 
 task_status() {
@@ -226,9 +245,20 @@ run_job() {
         resolve_blocked
         sync_hopper
     else
-        log "✗ $task_id FAILED (exit=$exit_code, ${duration}) — see $log_file"
-        hopper task status "$task_id" blocked -f
-        sync_hopper
+        local retries; retries=$(get_retry_count "$task_id")
+        if [[ "$retries" -lt "$MAX_RETRIES" ]]; then
+            local next=$(( retries + 1 ))
+            log "✗ $task_id FAILED (exit=$exit_code, ${duration}) — retry $next/$MAX_RETRIES in ${RETRY_DELAY}s — see $log_file"
+            set_retry_count "$task_id" "$next"
+            sync_hopper
+            sleep "$RETRY_DELAY"
+            hopper task status "$task_id" open -f 2>/dev/null || true
+            sync_hopper
+        else
+            log "✗ $task_id FAILED (exit=$exit_code, ${duration}) — exhausted $MAX_RETRIES retries — blocked — see $log_file"
+            hopper task status "$task_id" blocked -f
+            sync_hopper
+        fi
     fi
 
     local avail_post; avail_post=$(free_gib)
@@ -280,7 +310,16 @@ while true; do
         sync_hopper
 
         task_id=$(hopper --json task list --tag gpu-job --status open 2>/dev/null \
-            | jq -r 'sort_by(.created_at) | first | .id // empty')
+            | jq -r '
+                map(. + {_pri: (
+                    if .priority == "critical" then 0
+                    elif .priority == "high"   then 1
+                    elif .priority == "medium" then 2
+                    else 3 end
+                )})
+                | sort_by([._pri, .created_at])
+                | first | .id // empty
+            ')
         log "Next task: ${task_id:-<none>}"
 
         if [[ -n "$task_id" ]]; then
