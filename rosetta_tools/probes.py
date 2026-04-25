@@ -77,6 +77,8 @@ class ProbeResult:
     n_pos: int = 0
     n_neg: int = 0
     probe_type: str = "raw"  # "raw" | "fisher" | "auroc" | "gem" | "raw_fallback"
+    caz_regions: list[dict] = field(default_factory=list)
+    gem_region_thresholds: list[float] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +427,35 @@ def extract_gem_probe(
     # Handoff layer: one past CAZ end, clamped
     handoff_layer = min(dom.end + 1, n_layers - 1)
 
+    # Compute per-region assembly thresholds from positive training distribution
+    caz_regions_meta = []
+    gem_region_thresholds = []
+    for region in profile.regions:
+        region_max_cosines = []
+        for pos_idx in pos_train:
+            layer_cosines = []
+            for layer_offset in range(region.start, min(region.end + 1, n_layers)):
+                pos_acts_l, _ = layer_activations[layer_offset]
+                vec = pos_acts_l[pos_idx].astype(np.float64)
+                norm = np.linalg.norm(vec)
+                if norm > 1e-8:
+                    cosine = float(np.dot(vec / norm, direction))
+                else:
+                    cosine = 0.0
+                layer_cosines.append(cosine)
+            if layer_cosines:
+                region_max_cosines.append(max(layer_cosines))
+        threshold_r = float(np.percentile(region_max_cosines, 10)) if region_max_cosines else 0.0
+        caz_regions_meta.append({
+            'start': int(region.start),
+            'end': int(region.end),
+            'peak': int(region.peak),
+            'peak_separation': float(region.peak_separation),
+            'peak_coherence': float(region.peak_coherence),
+            'caz_score': float(region.caz_score),
+        })
+        gem_region_thresholds.append(round(threshold_r, 6))
+
     # Sep curve: per-layer raw separation for CAZ visualization
     sep_curve = np.array([
         _raw_separation(pa[pos_train], na[neg_train])
@@ -468,4 +499,6 @@ def extract_gem_probe(
         n_pos=n_pos,
         n_neg=n_neg,
         probe_type="gem",
+        caz_regions=caz_regions_meta,
+        gem_region_thresholds=gem_region_thresholds,
     )
