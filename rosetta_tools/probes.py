@@ -422,8 +422,8 @@ def extract_gem_probe(
         handoff convention.  Faster and sufficient when the endpoint layer is
         clean (AUROC > 0.95 concepts).
 
-    Both methods score at the handoff layer (``dom.end + 1``) and compute
-    per-region thresholds identically.
+    Both methods score at the dominant CAZ peak layer (``dom.peak``) and
+    compute per-region thresholds identically.
 
     Falls back to ``method='raw'`` if no CAZ regions are found.
 
@@ -453,7 +453,10 @@ def extract_gem_probe(
     -------
     ProbeResult
         ``probe_type='gem'`` (fisher_weighted) or ``'gem_endpoint'``.
-        ``layer`` is the handoff layer (``dom.end + 1``).
+        ``layer`` is the dominant CAZ peak layer (``dom.peak``).  This is
+        where the concept is most strongly represented in the residual stream —
+        using it as the reference layer maximises the detectable gap between
+        peak-assembly signal and final-layer routing signal.
         ``sep_curve`` uses per-layer raw separation so CAZ visualization
         works unchanged.
     """
@@ -507,8 +510,11 @@ def extract_gem_probe(
         pos_end, neg_end = layer_activations[endpoint]
         direction = _dom_direction(pos_end[pos_train], neg_end[neg_train])
 
-    # Handoff layer: one past CAZ end, clamped
-    handoff_layer = min(dom.end + 1, n_layers - 1)
+    # Peak layer: where concept signal is strongest in the dominant region.
+    # Using dom.peak (not dom.end+1) means threshold and concept_scores are
+    # calibrated at the layer with maximum separation — creating a measurable
+    # gap against the final layer when defensive framing degrades the signal.
+    peak_layer = min(int(dom.peak), n_layers - 1)
 
     # Compute per-region assembly thresholds from positive training distribution
     caz_regions_meta = []
@@ -545,8 +551,8 @@ def extract_gem_probe(
         for pa, na in layer_activations
     ])
 
-    # Scores at handoff layer
-    pos_h, neg_h = layer_activations[handoff_layer]
+    # Scores at peak layer
+    pos_h, neg_h = layer_activations[peak_layer]
     pos_scores = score_direction(pos_h[pos_eval], direction)
     neg_scores = score_direction(neg_h[neg_eval], direction)
 
@@ -565,16 +571,16 @@ def extract_gem_probe(
 
     probe_type = "gem" if direction_method == "fisher_weighted" else "gem_endpoint"
     log.info(
-        "  %s  %s  region L%d–L%d → handoff L%d  |  threshold %.3f  "
+        "  %s  %s  region L%d–L%d  peak L%d  |  threshold %.3f  "
         "(pos %.3f / neg %.3f)  AUROC %.3f",
         concept or "(unnamed)", probe_type.upper(),
-        dom.start, dom.end, handoff_layer,
+        dom.start, dom.end, peak_layer,
         threshold, pos_mean, neg_mean, auroc,
     )
 
     return ProbeResult(
         concept=concept,
-        layer=handoff_layer,
+        layer=peak_layer,
         direction=direction.astype(np.float32),
         threshold=round(threshold, 4),
         sep_curve=sep_curve,
