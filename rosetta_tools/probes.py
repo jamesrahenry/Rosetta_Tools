@@ -348,16 +348,17 @@ def extract_gem_probe(
     concept: str = "",
     attention_paradigm: str = "unknown",
 ) -> ProbeResult:
-    """Extract a probe using GEM handoff layer and settled direction.
+    """Extract a probe using GEM handoff layer and full-region direction.
 
     For semantic concepts whose signal assembles through transformer layers
-    via CAZ dynamics.  Identifies the dominant CAZ region, takes the
-    difference-of-means direction at the CAZ end (the settled assembly
-    product), and scores at the handoff layer (CAZ end + 1).
+    via CAZ dynamics.  Identifies the dominant CAZ region, computes the
+    difference-of-means direction from activations pooled across every layer
+    in that region (not just the endpoint), and scores at the handoff layer
+    (CAZ end + 1).
 
-    This is more principled than ``extract_probe(method='raw')`` for
-    semantic concepts because it scores after the rotation completes rather
-    than at the noisiest mid-assembly point.
+    Pooling across the full region captures the stable directional component
+    that persists throughout the assembly process rather than a snapshot at
+    the endpoint alone, which can be noisy mid-assembly.
 
     Falls back to ``method='raw'`` if no CAZ regions are found.
 
@@ -420,9 +421,17 @@ def extract_gem_probe(
         pos_eval = pos_train
         neg_eval = neg_train
 
-    # Settled direction: DoM at CAZ end (assembly product)
-    pos_end, neg_end = layer_activations[dom.end]
-    direction = _dom_direction(pos_end[pos_train], neg_end[neg_train])
+    # Direction from the full dominant CAZ region: pool all layers [dom.start, dom.end]
+    # so the DoM captures the stable directional component across the entire assembly
+    # process rather than a snapshot at the endpoint alone.
+    region_layers = range(dom.start, min(dom.end + 1, n_layers))
+    pos_region = np.concatenate(
+        [layer_activations[l][0][pos_train] for l in region_layers], axis=0
+    )
+    neg_region = np.concatenate(
+        [layer_activations[l][1][neg_train] for l in region_layers], axis=0
+    )
+    direction = _dom_direction(pos_region, neg_region)
 
     # Handoff layer: one past CAZ end, clamped
     handoff_layer = min(dom.end + 1, n_layers - 1)
@@ -481,9 +490,9 @@ def extract_gem_probe(
         auroc = 0.0
 
     log.info(
-        "  %s  GEM  settled@L%d → handoff L%d  |  threshold %.3f  "
+        "  %s  GEM  region L%d–L%d → handoff L%d  |  threshold %.3f  "
         "(pos %.3f / neg %.3f)  AUROC %.3f",
-        concept or "(unnamed)", dom.end, handoff_layer,
+        concept or "(unnamed)", dom.start, dom.end, handoff_layer,
         threshold, pos_mean, neg_mean, auroc,
     )
 
