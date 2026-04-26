@@ -127,6 +127,60 @@ def _dom_direction(pos: NDArray, neg: NDArray) -> NDArray:
     return d / norm
 
 
+def _fisher_weighted_direction(
+    layer_activations: list[tuple[NDArray, NDArray]],
+    layer_metrics: list,
+    pos_train: NDArray,
+    neg_train: NDArray,
+    start: int,
+    end: int,
+) -> NDArray:
+    """Fisher-weighted average DoM direction across layers [start, end].
+
+    Computes a per-layer DoM direction at each layer in the region, weights
+    by Fisher separation at that layer, sign-aligns all directions to the
+    endpoint direction, and returns the normalized weighted sum.
+
+    Layers with zero or negative separation contribute nothing (clamped).
+    If all weights are zero, falls back to equal-weight average.
+    """
+    n_layers = len(layer_activations)
+    region_layers = list(range(start, min(end + 1, n_layers)))
+
+    if not region_layers:
+        pos_end, neg_end = layer_activations[min(end, n_layers - 1)]
+        return _dom_direction(pos_end[pos_train], neg_end[neg_train])
+
+    per_layer_dirs: list[NDArray] = []
+    weights: list[float] = []
+    for l in region_layers:
+        pos_l, neg_l = layer_activations[l]
+        d_l = _dom_direction(pos_l[pos_train], neg_l[neg_train])
+        w_l = max(0.0, float(layer_metrics[l].separation))
+        per_layer_dirs.append(d_l)
+        weights.append(w_l)
+
+    # Sign-align all directions to the endpoint direction (last layer in region)
+    ref = per_layer_dirs[-1]
+    aligned: list[NDArray] = [
+        d if float(np.dot(d, ref)) >= 0 else -d
+        for d in per_layer_dirs
+    ]
+
+    total_w = sum(weights)
+    if total_w < 1e-8:
+        weights = [1.0] * len(aligned)
+        total_w = float(len(aligned))
+
+    weighted_sum: NDArray = sum(  # type: ignore[assignment]
+        w * d for w, d in zip(weights, aligned)
+    )
+    norm = float(np.linalg.norm(weighted_sum))
+    if norm < 1e-8:
+        return aligned[-1]
+    return weighted_sum / norm
+
+
 def _raw_separation(pos: NDArray, neg: NDArray) -> float:
     """Raw projected separation: centroid gap along the DoM direction."""
     d = pos.mean(axis=0) - neg.mean(axis=0)
@@ -347,18 +401,28 @@ def extract_gem_probe(
     seed: int = 42,
     concept: str = "",
     attention_paradigm: str = "unknown",
+    direction_method: Literal["fisher_weighted", "endpoint"] = "fisher_weighted",
 ) -> ProbeResult:
-    """Extract a probe using GEM handoff layer and full-region direction.
+    """Extract a probe using GEM handoff layer and region-aware direction.
 
     For semantic concepts whose signal assembles through transformer layers
-    via CAZ dynamics.  Identifies the dominant CAZ region, computes the
-    difference-of-means direction from activations pooled across every layer
-    in that region (not just the endpoint), and scores at the handoff layer
-    (CAZ end + 1).
+    via CAZ dynamics.  Identifies the dominant CAZ region and computes the
+    concept direction using one of two strategies (``direction_method``):
 
-    Pooling across the full region captures the stable directional component
-    that persists throughout the assembly process rather than a snapshot at
-    the endpoint alone, which can be noisy mid-assembly.
+    ``"fisher_weighted"`` (default)
+        Per-layer DoM directions weighted by Fisher separation at each layer,
+        sign-aligned to the endpoint and normalized.  Down-weights noisy
+        early-region layers; up-weights the high-separation core.  Recommended
+        for high-noise concepts (AUROC < 0.90) and production probe builds.
+
+    ``"endpoint"``
+        DoM direction extracted at a single layer: the last layer of the
+        dominant CAZ region (``dom.end``).  Equivalent to the original GEM
+        handoff convention.  Faster and sufficient when the endpoint layer is
+        clean (AUROC > 0.95 concepts).
+
+    Both methods score at the handoff layer (``dom.end + 1``) and compute
+    per-region thresholds identically.
 
     Falls back to ``method='raw'`` if no CAZ regions are found.
 
@@ -375,13 +439,17 @@ def extract_gem_probe(
     attention_paradigm:
         Passed to ``find_caz_regions_scored`` for architecture-aware
         threshold calibration.
+    direction_method:
+        ``"fisher_weighted"`` (default) — weighted average over region layers,
+        weights = Fisher separation; ``"endpoint"`` — single DoM at ``dom.end``.
 
     Returns
     -------
     ProbeResult
-        ``probe_type='gem'``.  ``layer`` is the handoff layer.
-        ``sep_curve`` uses per-layer raw separation (same scale as
-        ``method='raw'``) so CAZ visualization works unchanged.
+        ``probe_type='gem'`` (fisher_weighted) or ``'gem_endpoint'``.
+        ``layer`` is the handoff layer (``dom.end + 1``).
+        ``sep_curve`` uses per-layer raw separation so CAZ visualization
+        works unchanged.
     """
     from rosetta_tools.caz import compute_layer_metrics, find_caz_regions_scored
 
@@ -421,17 +489,17 @@ def extract_gem_probe(
         pos_eval = pos_train
         neg_eval = neg_train
 
-    # Direction from the full dominant CAZ region: pool all layers [dom.start, dom.end]
-    # so the DoM captures the stable directional component across the entire assembly
-    # process rather than a snapshot at the endpoint alone.
-    region_layers = range(dom.start, min(dom.end + 1, n_layers))
-    pos_region = np.concatenate(
-        [layer_activations[l][0][pos_train] for l in region_layers], axis=0
-    )
-    neg_region = np.concatenate(
-        [layer_activations[l][1][neg_train] for l in region_layers], axis=0
-    )
-    direction = _dom_direction(pos_region, neg_region)
+    # Direction extraction — strategy selected by direction_method
+    if direction_method == "fisher_weighted":
+        direction = _fisher_weighted_direction(
+            layer_activations, layer_metrics, pos_train, neg_train,
+            start=dom.start, end=dom.end,
+        )
+    else:
+        # "endpoint": single DoM at dom.end (original GEM convention)
+        endpoint = min(dom.end, n_layers - 1)
+        pos_end, neg_end = layer_activations[endpoint]
+        direction = _dom_direction(pos_end[pos_train], neg_end[neg_train])
 
     # Handoff layer: one past CAZ end, clamped
     handoff_layer = min(dom.end + 1, n_layers - 1)
@@ -489,10 +557,12 @@ def extract_gem_probe(
     except (ValueError, ImportError):
         auroc = 0.0
 
+    probe_type = "gem" if direction_method == "fisher_weighted" else "gem_endpoint"
     log.info(
-        "  %s  GEM  region L%d–L%d → handoff L%d  |  threshold %.3f  "
+        "  %s  %s  region L%d–L%d → handoff L%d  |  threshold %.3f  "
         "(pos %.3f / neg %.3f)  AUROC %.3f",
-        concept or "(unnamed)", dom.start, dom.end, handoff_layer,
+        concept or "(unnamed)", probe_type.upper(),
+        dom.start, dom.end, handoff_layer,
         threshold, pos_mean, neg_mean, auroc,
     )
 
@@ -507,7 +577,7 @@ def extract_gem_probe(
         auroc=round(auroc, 4),
         n_pos=n_pos,
         n_neg=n_neg,
-        probe_type="gem",
+        probe_type=probe_type,
         caz_regions=caz_regions_meta,
         gem_region_thresholds=gem_region_thresholds,
     )
