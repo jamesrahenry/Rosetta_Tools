@@ -402,6 +402,7 @@ def extract_gem_probe(
     concept: str = "",
     attention_paradigm: str = "unknown",
     direction_method: Literal["fisher_weighted", "endpoint"] = "fisher_weighted",
+    calibration_percentile: float = 5.0,
 ) -> ProbeResult:
     """Extract a probe using GEM handoff layer and region-aware direction.
 
@@ -442,6 +443,11 @@ def extract_gem_probe(
     direction_method:
         ``"fisher_weighted"`` (default) — weighted average over region layers,
         weights = Fisher separation; ``"endpoint"`` — single DoM at ``dom.end``.
+    calibration_percentile:
+        Percentile of positive-example max cosines used to set each region's
+        assembly threshold (default 5.0).  Lower = more sensitive (higher recall,
+        lower precision).  95% of training positives exceed the default threshold.
+        Use 10–15 for production probes; 3–5 for demo/exploratory use.
 
     Returns
     -------
@@ -522,7 +528,7 @@ def extract_gem_probe(
                 layer_cosines.append(cosine)
             if layer_cosines:
                 region_max_cosines.append(max(layer_cosines))
-        threshold_r = float(np.percentile(region_max_cosines, 10)) if region_max_cosines else 0.0
+        threshold_r = float(np.percentile(region_max_cosines, calibration_percentile)) if region_max_cosines else 0.0
         caz_regions_meta.append({
             'start': int(region.start),
             'end': int(region.end),
