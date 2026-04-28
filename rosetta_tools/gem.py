@@ -795,3 +795,193 @@ def gem_diagnostics(gem: ConceptGEM) -> dict:
         "caz_score_max": round(float(max(caz_scores)), 4),
         "caz_score_min": round(float(min(caz_scores)), 4),
     }
+
+
+# ---------------------------------------------------------------------------
+# CIA cross-pollination — routing_held, stage_detail
+# Lifted from Concept_Integrity_Auditor/cia_trace/deep.py and trace.py
+# and adapted for the Rosetta GEM vocabulary (CAZ=allocation, GEM=assembly).
+# ---------------------------------------------------------------------------
+
+_CAZ_TYPE_BREAKPOINTS = [
+    (0.10, "embedding"),   # L0–10% of depth
+    (0.35, "active"),      # 10–35%
+    (0.70, "deep"),        # 35–70%
+    (0.90, "functional"),  # 70–90%
+    (1.01, "artifact"),    # 90–100%
+]
+
+
+def classify_caz_depth(layer: int, n_layers: int) -> str:
+    """Return a depth-class label for a layer index.
+
+    Classes follow the CAZ allocation vocabulary:
+      embedding  — very early (tokenisation / position encoding region)
+      active     — shallow assembly (syntactic / surface features)
+      deep       — mid-network (semantic integration)
+      functional — late network (task-specific routing)
+      artifact   — near-final (output projection artefacts)
+    """
+    rel = layer / max(n_layers - 1, 1)
+    for threshold, label in _CAZ_TYPE_BREAKPOINTS:
+        if rel < threshold:
+            return label
+    return "artifact"
+
+
+def routing_held_ratio(
+    baseline_per_layer: dict[int, float],
+    peak_layer: int,
+    final_layer: int,
+    degradation_factor: float = 0.95,
+) -> tuple[float, bool]:
+    """Population-level routing survival computed from ablation baseline data.
+
+    Measures whether the concept-discriminative signal at the CAZ peak layer
+    persists to the final layer, without any intervention.
+
+    Uses the Fisher separation scores from the clean (no-ablation) baseline
+    in ablation_gem_*.json.  This is a population-level proxy for the
+    per-input cosine check in CIA's DeepModule._compute_routing.
+
+    Parameters
+    ----------
+    baseline_per_layer : dict[int, float]
+        Clean separation at each measured layer, keyed by layer index.
+        Comes from ablation_gem_*.json handoff.per_layer[l]["baseline_sep"].
+    peak_layer : int
+        The CAZ peak layer for this node.
+    final_layer : int
+        The model's last transformer layer index.
+    degradation_factor : float
+        Threshold fraction: ratio >= this → routing held.  Default 0.95
+        matches CIA's DeepModule.
+
+    Returns
+    -------
+    (ratio, held) where ratio = baseline[final] / baseline[peak], and
+    held = ratio >= degradation_factor.
+    """
+    peak_sep = baseline_per_layer.get(peak_layer, 0.0)
+    final_sep = baseline_per_layer.get(final_layer, 0.0)
+    if peak_sep <= 0:
+        return (0.0, False)
+    ratio = final_sep / peak_sep
+    return (round(ratio, 4), ratio >= degradation_factor)
+
+
+def routing_held_from_permutation(
+    subset_results: dict[str, dict],
+    node_idx: int,
+    final_layer: int,
+    baseline_final_sep: float,
+    contribution_threshold: float = 0.05,
+) -> bool:
+    """Derive routing_held for a single node from permutation ablation results.
+
+    A node's signal is considered to "route" to the final layer if ablating
+    that node alone causes at least contribution_threshold fractional reduction
+    in final-layer separation.  If ablating the node has no effect on the
+    final layer, its assembled signal died before reaching the output.
+
+    Parameters
+    ----------
+    subset_results : dict
+        The "subsets" dict from ablate_gem_permutation output.
+        Keys are comma-separated node indices, e.g. "0", "1", "0,1".
+    node_idx : int
+        Which node to evaluate.
+    final_layer : int
+        Final transformer layer index (used to look up reduction values).
+    baseline_final_sep : float
+        Baseline separation at the final layer (no ablation).
+    contribution_threshold : float
+        Minimum final-layer reduction fraction to count as routed.
+
+    Returns
+    -------
+    bool — True if this node contributes to final-layer representation.
+    """
+    key = str(node_idx)
+    if key not in subset_results:
+        return False
+    return subset_results[key]["final_reduction"] >= contribution_threshold
+
+
+def stage_detail(
+    nodes: list,
+    n_layers: int,
+    routing_held_per_node: dict[int, bool] | None = None,
+) -> str:
+    """Human-readable one-sentence stage description for a multi-node GEM concept.
+
+    Adapted from CIA's CIATrace._make_stage_detail.  Vocabulary follows
+    Rosetta's CAZ=allocation/GEM=assembly framing.
+
+    Parameters
+    ----------
+    nodes : list[GEMNode] or list[dict]
+        The GEM nodes, sorted shallow to deep (standard GEM order).
+        Accepts both GEMNode objects and raw JSON dicts.
+    n_layers : int
+        Total transformer layer count.
+    routing_held_per_node : dict[int, bool] | None
+        Per-node routing_held result.  None = unknown.
+
+    Returns
+    -------
+    Human-readable string, e.g.:
+        "Multimodal (2 regions): dominant functional L28–30 (score=0.69),
+         also embedding; routing held for node 1, lost for node 0."
+    """
+    def _get(node, attr, default=None):
+        if isinstance(node, dict):
+            return node.get(attr, default)
+        return getattr(node, attr, default)
+
+    if not nodes:
+        return "No GEM nodes detected."
+
+    if len(nodes) == 1:
+        n = nodes[0]
+        start = _get(n, "caz_start")
+        end = _get(n, "caz_end")
+        score = _get(n, "caz_score", 0.0)
+        depth = classify_caz_depth(_get(n, "caz_peak", 0), n_layers)
+        routing = ""
+        if routing_held_per_node is not None:
+            routing = "; routing held." if routing_held_per_node.get(0, True) \
+                else "; routing lost before final layer."
+        return (
+            f"Allocated in {depth} region only "
+            f"(L{start}–{end}, score={score:.2f}){routing}"
+        )
+
+    # Multimodal: find dominant node by caz_score
+    scored = [(i, _get(n, "caz_score", 0.0), n) for i, n in enumerate(nodes)]
+    dom_i, dom_score, dom_node = max(scored, key=lambda x: x[1])
+    dom_depth = classify_caz_depth(_get(dom_node, "caz_peak", 0), n_layers)
+    dom_start = _get(dom_node, "caz_start")
+    dom_end = _get(dom_node, "caz_end")
+
+    others = [
+        classify_caz_depth(_get(n, "caz_peak", 0), n_layers)
+        for i, _, n in scored if i != dom_i
+    ]
+
+    routing_parts = []
+    if routing_held_per_node is not None:
+        for i in range(len(nodes)):
+            held = routing_held_per_node.get(i, None)
+            if held is not None:
+                routing_parts.append(f"n{i} {'held' if held else 'lost'}")
+    routing_str = (
+        "; routing: " + ", ".join(routing_parts) + "."
+        if routing_parts else "."
+    )
+
+    return (
+        f"Multimodal ({len(nodes)} regions): dominant {dom_depth} "
+        f"L{dom_start}–{dom_end} (score={dom_score:.2f}), "
+        f"also {', '.join(others)}{routing_str}"
+    )
