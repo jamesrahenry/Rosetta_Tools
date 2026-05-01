@@ -180,8 +180,8 @@ classify_failure() {
     local log_file="$1"
     [[ -f "$log_file" ]] || { echo "retry_slow"; return; }
 
-    # OOM — needs code change (batch size), not a re-run
-    if grep -q "OutOfMemoryError\|CUDA out of memory" "$log_file"; then
+    # OOM or disk-full — needs hardware/config change, not a re-run
+    if grep -q "OutOfMemoryError\|CUDA out of memory\|No space left on device" "$log_file"; then
         echo "no_retry"; return
     fi
 
