@@ -474,6 +474,7 @@ def load_model_with_retry(
     device: str,
     device_map: str | None = None,
     load_in_8bit: bool = False,
+    quantization_config=None,
     max_retries: int = 15,
     retry_delay: float = 10.0,
 ):
@@ -569,6 +570,13 @@ def load_model_with_retry(
 
     # Phase 2: load from local cache — no network access.
     effective_device_map = device_map if device_map is not None else device
+    if quantization_config is not None:
+        return model_cls.from_pretrained(
+            model_id,
+            quantization_config=quantization_config,
+            device_map=effective_device_map,
+            local_files_only=True,
+        )
     if load_in_8bit:
         return model_cls.from_pretrained(
             model_id,
