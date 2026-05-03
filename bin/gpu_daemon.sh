@@ -64,6 +64,7 @@ sync_repos() {
         ["$HOME/rosetta_tools"]="https://github.com/jamesrahenry/rosetta_tools.git"
         ["$HOME/Rosetta_Analysis"]="https://github.com/jamesrahenry/Rosetta_Analysis.git"
         ["$HOME/Rosetta_Concept_Pairs"]="https://github.com/jamesrahenry/Rosetta_Concept_Pairs.git"
+        ["$HOME/Concept_Integrity_Auditor"]="https://github.com/james-henry-git/Concept_Integrity_Auditor.git"
     )
 
     for repo in "${!REPO_URLS[@]}"; do
@@ -90,7 +91,10 @@ sync_repos() {
         else
             log "  ⚠ pull skipped (diverged): $name"
         fi
-        if [[ -f "$repo/pyproject.toml" ]]; then
+        # Skip auto-pip-install for CIA — it owns its own uv-managed .venv
+        # which the job command provisions via `uv sync`. Forcing pip install
+        # into the daemon's env risks dependency conflicts and is unnecessary.
+        if [[ -f "$repo/pyproject.toml" && "$name" != "Concept_Integrity_Auditor" ]]; then
             pip install -q -e "$repo" 2>/dev/null && log "  reinstalled $name"
         fi
     done
