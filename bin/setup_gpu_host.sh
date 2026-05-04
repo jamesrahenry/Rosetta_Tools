@@ -137,6 +137,10 @@ fi
 pip install --quiet -e "${HOME}/rosetta_tools" \
     || log "⚠ rosetta_tools pip install failed — continue manually"
 
+# cuSPARSELt is required by PyTorch >=2.3 but not always present in GPU images
+pip install --quiet "nvidia-cusparselt-cu12>=0.6" \
+    || log "⚠ nvidia-cusparselt-cu12 install failed — CKA/CCA ops may error"
+
 # ---------------------------------------------------------------------------
 # 6. Print approval steps
 # ---------------------------------------------------------------------------
