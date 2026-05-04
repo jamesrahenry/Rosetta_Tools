@@ -61,9 +61,7 @@ log() { echo "$(date +%H:%M:%S) [daemon] $*"; }
 sync_hopper() { hopper sync 2>/dev/null || true; }
 
 free_gib() {
-    local target="${HF_HOME:-$HOME/.cache/huggingface}"
-    mkdir -p "$target"
-    df -BG "$target" | awk 'NR==2 {gsub("G",""); print $4}'
+    df -BG "$HOME" | awk 'NR==2 {gsub("G",""); print $4}'
 }
 
 purge_hf_cache() {
@@ -73,6 +71,14 @@ purge_hf_cache() {
         rm -rf "$cache_dir"/models--*
         log "HF cache cleared ($before freed) — $(free_gib) GiB free"
     fi
+}
+
+purge_npy_files() {
+    local models_dir="$HOME/rosetta_data/models"
+    [[ -d "$models_dir" ]] || return
+    local before; before=$(du -sh "$models_dir" 2>/dev/null | cut -f1)
+    find "$models_dir" -name "*.npy" -delete 2>/dev/null || true
+    log "npy scratch purged ($before → $(du -sh "$models_dir" 2>/dev/null | cut -f1)) — $(free_gib) GiB free"
 }
 
 ensure_data_dirs() {
@@ -301,7 +307,8 @@ run_job() {
 
     local avail; avail=$(free_gib)
     if [[ "$avail" -lt "$MIN_DISK_GIB" ]]; then
-        log "Low disk (${avail} GiB) — purging HF cache before run"
+        log "Low disk (${avail} GiB on $HOME) — purging npy scratch and HF cache before run"
+        purge_npy_files
         purge_hf_cache
     fi
 
@@ -379,9 +386,10 @@ run_job() {
 
     local avail_post; avail_post=$(free_gib)
     if [[ "$avail_post" -lt "$MIN_DISK_GIB" ]]; then
+        purge_npy_files
         purge_hf_cache
     else
-        log "HF cache retained — ${avail_post} GiB free (threshold: ${MIN_DISK_GIB} GiB)"
+        log "Disk ok — ${avail_post} GiB free on $HOME (threshold: ${MIN_DISK_GIB} GiB)"
     fi
 }
 
