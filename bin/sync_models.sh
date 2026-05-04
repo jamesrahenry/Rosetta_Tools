@@ -56,8 +56,13 @@ fi
 
 mkdir -p "$LOCAL_MODELS"
 
-RSYNC_FLAGS=(-avz --ignore-existing)
+MIN_FREE_GIB=10
+RSYNC_FLAGS=(-avz --size-only --partial)
 $DRY_RUN && RSYNC_FLAGS+=(--dry-run)
+
+free_gib() {
+    df -BG "${1:-$HOME}" | awk 'NR==2 {gsub("G",""); print $4}'
+}
 
 while IFS= read -r line; do
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
@@ -67,10 +72,15 @@ while IFS= read -r line; do
     PEER_MODELS="${host}:${LOCAL_MODELS}"
 
     if $DO_PULL; then
-        log "Pull $alias → local"
-        rsync "${RSYNC_FLAGS[@]}" "$PEER_MODELS" "$LOCAL_MODELS" \
-            && log "  pull done" \
-            || log "  ⚠ pull failed for $alias"
+        avail=$(free_gib "$LOCAL_MODELS")
+        if [[ "$avail" -lt "$MIN_FREE_GIB" ]]; then
+            log "⚠ Skipping pull from $alias — only ${avail} GiB free (min ${MIN_FREE_GIB} GiB)"
+        else
+            log "Pull $alias → local  (${avail} GiB free)"
+            rsync "${RSYNC_FLAGS[@]}" "$PEER_MODELS" "$LOCAL_MODELS" \
+                && log "  pull done" \
+                || log "  ⚠ pull failed for $alias (disk full?)"
+        fi
     fi
 
     if $DO_PUSH; then
