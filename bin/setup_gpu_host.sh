@@ -3,17 +3,20 @@
 #
 # Run this script ONCE on each new GPU host. It:
 #   1. Verifies / installs Hopper
-#   2. Creates a ~/rosetta_queue/.hopper/ project instance with the right
-#      instance ID (Rosetta_Program) and upstream configured
+#   2. Configures the GLOBAL ~/.hopper config with the Rosetta_Program
+#      instance ID and upstream server — so 'hopper' works from any directory
 #   3. Generates a DID key for this host if one doesn't exist
-#   4. Prints the commands James must run on the DEV machine to approve this host
+#   4. Prompts for a short host alias (shown in gpu_queue.sh beside running jobs)
 #   5. Clones rosetta_tools
-#   6. Prints the tmux start command
+#   6. Prints the commands to run on the dev machine to approve this host
+#
+# ~/rosetta_queue/ is created only for host_alias and job logs.
+# No embedded .hopper/ — the global config handles everything.
 #
 # Usage:
 #   bash setup_gpu_host.sh [--upstream-server URL]
 #
-# Written: 2026-05-04 18:30 UTC
+# Written: 2026-05-04 20:15 UTC
 
 set -euo pipefail
 
@@ -23,7 +26,7 @@ set -euo pipefail
 UPSTREAM_SERVER="https://hopper.henrynet.ca"
 ROSETTA_TOOLS_URL="https://github.com/jamesrahenry/rosetta_tools.git"
 QUEUE_DIR="${HOME}/rosetta_queue"
-HOPPER_DIR="${QUEUE_DIR}/.hopper"
+GLOBAL_HOPPER_DIR="${HOME}/.hopper"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -47,17 +50,63 @@ if ! command -v hopper &>/dev/null; then
     log "Hopper not found — installing via pip..."
     pip install --quiet hopper-ai || die "pip install hopper-ai failed. Install manually then re-run."
 fi
-HOPPER_VERSION=$(hopper --version 2>/dev/null || echo "unknown")
-log "Hopper version: $HOPPER_VERSION"
+log "Hopper $(hopper --version 2>/dev/null || echo 'unknown')"
 
 # ---------------------------------------------------------------------------
-# 2. Create rosetta_queue project directory with embedded .hopper
+# 2. Configure global Hopper with Rosetta_Program instance + upstream server
+#
+# We patch ~/.hopper/config.yaml in-place so we don't clobber other fields
+# the user may have set. Python is guaranteed present (hopper requires it).
 # ---------------------------------------------------------------------------
-log "Creating queue directory: $QUEUE_DIR"
+mkdir -p "$GLOBAL_HOPPER_DIR"
+
+# Ensure a base global config exists
+if [[ ! -f "${GLOBAL_HOPPER_DIR}/config.yaml" ]]; then
+    log "Initialising global Hopper config..."
+    hopper init --non-interactive 2>/dev/null || true
+fi
+
+log "Configuring global Hopper: instance=Rosetta_Program, upstream=${UPSTREAM_SERVER}"
+python3 - <<PYEOF
+import yaml, pathlib, sys
+
+p = pathlib.Path.home() / ".hopper/config.yaml"
+cfg = yaml.safe_load(p.read_text()) if p.exists() else {}
+
+# Instance
+cfg.setdefault("instance", {})["id"]   = "Rosetta_Program"
+cfg.setdefault("instance", {})["name"] = "Rosetta_Program"
+
+# Upstream in the default profile
+cfg.setdefault("profiles", {}).setdefault("default", {}) \
+   .setdefault("upstream", {}).update({
+       "server":       "${UPSTREAM_SERVER}",
+       "did_key_path": str(pathlib.Path.home() / ".hopper/did.key"),
+       "enabled":      True,
+   })
+
+p.write_text(yaml.dump(cfg, default_flow_style=False))
+print(f"  wrote {p}")
+PYEOF
+
+# ---------------------------------------------------------------------------
+# 3. Generate DID key for this host if not already present
+# ---------------------------------------------------------------------------
+if [[ ! -f "${GLOBAL_HOPPER_DIR}/did.key" ]]; then
+    log "Generating DID key for ${HOSTNAME}..."
+    hopper upstream init
+else
+    log "DID key already exists at ${GLOBAL_HOPPER_DIR}/did.key"
+fi
+
+DID=$(hopper upstream whoami 2>/dev/null || echo "<could not read DID>")
+log "This host's DID: $DID"
+
+# ---------------------------------------------------------------------------
+# 4. Short alias for this host (shown in gpu_queue.sh beside running jobs)
+# ---------------------------------------------------------------------------
 mkdir -p "$QUEUE_DIR"
 
-# Short name for this host — shown in gpu_queue.sh next to running jobs.
-# Defaults to the first label of the hostname (strips domain + cluster suffix).
 DEFAULT_ALIAS="$(hostname | cut -d. -f1 | sed 's/-[0-9]*$//' | cut -c1-10)"
 if [[ -f "${QUEUE_DIR}/host_alias" ]]; then
     EXISTING_ALIAS=$(cat "${QUEUE_DIR}/host_alias")
@@ -71,59 +120,6 @@ fi
 echo "$HOST_ALIAS" > "${QUEUE_DIR}/host_alias"
 log "Host alias: '$HOST_ALIAS' → ${QUEUE_DIR}/host_alias"
 
-if [[ ! -f "${HOPPER_DIR}/config.yaml" ]]; then
-    log "Initialising Hopper project at $QUEUE_DIR ..."
-    # hopper init creates .hopper/ in the current directory
-    (cd "$QUEUE_DIR" && hopper init --non-interactive 2>/dev/null || true)
-fi
-
-# ---------------------------------------------------------------------------
-# 3. Write the project config (overwrite to ensure correct values)
-# ---------------------------------------------------------------------------
-mkdir -p "$HOPPER_DIR"
-cat > "${HOPPER_DIR}/config.yaml" <<YAML
-instance:
-  id: Rosetta_Program
-  name: Rosetta_Program
-  scope: personal
-storage:
-  type: markdown
-  path: ${HOPPER_DIR}
-sync:
-  enabled: true
-  server_url: null
-  sync_patterns: true
-  sync_episodes: false
-defaults:
-  priority: medium
-  status: pending
-active_profile: default
-profiles:
-  default:
-    mode: local
-    local:
-      path: ${HOPPER_DIR}
-      auto_detect_embedded: true
-    upstream:
-      server: ${UPSTREAM_SERVER}
-      did_key_path: ${HOPPER_DIR}/did.key
-      enabled: true
-YAML
-log "Wrote ${HOPPER_DIR}/config.yaml (instance=Rosetta_Program, upstream=${UPSTREAM_SERVER})"
-
-# ---------------------------------------------------------------------------
-# 4. Generate DID key for this host if not already present
-# ---------------------------------------------------------------------------
-if [[ ! -f "${HOPPER_DIR}/did.key" ]]; then
-    log "Generating DID key for ${HOSTNAME}..."
-    (cd "$QUEUE_DIR" && hopper upstream init)
-else
-    log "DID key already exists at ${HOPPER_DIR}/did.key"
-fi
-
-DID=$(cd "$QUEUE_DIR" && hopper upstream whoami 2>/dev/null || echo "<could not read DID>")
-log "This host's DID: $DID"
-
 # ---------------------------------------------------------------------------
 # 5. Clone / update rosetta_tools
 # ---------------------------------------------------------------------------
@@ -136,38 +132,31 @@ else
         || log "  ⚠ pull skipped (diverged) — run manually if needed"
 fi
 
-pip install --quiet -e "${HOME}/rosetta_tools" || log "⚠ rosetta_tools pip install failed — continue manually"
+pip install --quiet -e "${HOME}/rosetta_tools" \
+    || log "⚠ rosetta_tools pip install failed — continue manually"
 
 # ---------------------------------------------------------------------------
-# 6. Print approval commands for James (dev machine)
+# 6. Print approval steps
 # ---------------------------------------------------------------------------
 echo ""
 echo "======================================================================"
-echo "  NEXT STEPS — run these on the DEV machine to approve this host"
+echo "  NEXT STEPS — approve this host from the dev machine"
 echo "======================================================================"
 echo ""
-echo "  cd ~/Source/Rosetta_Program"
+echo "  DEV machine (~/Source/Rosetta_Program):"
+echo "    hopper upstream invite create -n Rosetta_Program"
 echo ""
-echo "  # Generate an invite token (single-use):"
-echo "  hopper upstream invite create -n Rosetta_Program"
+echo "  THIS host — after receiving the token:"
+echo "    hopper upstream redeem <TOKEN>"
+echo "    hopper sync"
 echo ""
-echo "  # Send the token to ${HOSTNAME}, then on THIS host run:"
-echo "  cd ~/rosetta_queue"
-echo "  hopper upstream set-server ${UPSTREAM_SERVER}"
-echo "  hopper upstream redeem <TOKEN>"
-echo ""
-echo "  # Verify the host is recognised:"
-echo "  hopper upstream status"
-echo ""
-echo "  # Pull all current tasks to this host (must be in rosetta_queue):"
-echo "  cd ~/rosetta_queue && hopper sync"
+echo "  Verify:"
+echo "    hopper task list --tag gpu-job --compact"
 echo ""
 echo "======================================================================"
 echo ""
-echo "  START DAEMON (on ${HOSTNAME}, after invite/redeem):"
-echo ""
-echo "  tmux new-session -d -s gpu \\"
-echo "    'cd ~/rosetta_queue && bash ~/rosetta_tools/bin/gpu_daemon.sh'"
-echo "  tmux attach -t gpu"
+echo "  START DAEMON:"
+echo "    tmux new-session -d -s gpu 'bash ~/rosetta_tools/bin/gpu_daemon.sh'"
+echo "    tmux attach -t gpu"
 echo ""
 echo "======================================================================"
