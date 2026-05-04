@@ -143,8 +143,12 @@ get_full_description() {
 }
 
 get_command() {
-    # Strip all ### markers (depends, retries, …) — they are always appended at the end
-    get_full_description "$1" | sed 's/ *### .*$//'
+    # Take only the first paragraph (lines before the first blank line) so that
+    # prose notes appended after a blank line in the description are not passed
+    # to bash. Then strip queue_jobs.sh ### markers from the end.
+    get_full_description "$1" \
+        | awk '/^[[:space:]]*$/{exit} {print}' \
+        | sed 's/ *### .*$//'
 }
 
 get_deps() {
