@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sync_results.sh — Pull rosetta_data from multiple GPU hosts and merge.
 #
-# Reads hosts from ~/rosetta_queue/sync_hosts.conf. Each line:
+# Reads hosts from <dest-parent>/rosetta_queue/sync_hosts.conf. Each line:
 #   alias   rsync_source
 # e.g.:
 #   coder   coder@main.MI-Workspace.james-henry-git.coder:~/rosetta_data/
@@ -24,16 +24,16 @@
 
 set -euo pipefail
 
-CONF="${HOME}/rosetta_queue/sync_hosts.conf"
-STAGING="${HOME}/.rosetta_sync_staging"
 DEST="${HOME}/Source/Rosetta_Program/rosetta_data"
+CONF="$(dirname "$DEST")/rosetta_queue/sync_hosts.conf"
+STAGING="${HOME}/.rosetta_sync_staging"
 DRY_RUN=false
 RSYNC_EXCLUDES=(--exclude='*.npy' --exclude='*.pt' --exclude='*.bin' --exclude='*.safetensors')
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
-        --dest)    DEST="$2"; shift 2 ;;
+        --dest)    DEST="$2"; CONF="$(dirname "$2")/rosetta_queue/sync_hosts.conf"; shift 2 ;;
         -h|--help)
             echo "Usage: sync_results.sh [--dry-run] [--dest DIR]"
             exit 0 ;;
