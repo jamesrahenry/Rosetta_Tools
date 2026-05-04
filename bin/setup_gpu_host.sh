@@ -56,6 +56,21 @@ log "Hopper version: $HOPPER_VERSION"
 log "Creating queue directory: $QUEUE_DIR"
 mkdir -p "$QUEUE_DIR"
 
+# Short name for this host — shown in gpu_queue.sh next to running jobs.
+# Defaults to the first label of the hostname (strips domain + cluster suffix).
+DEFAULT_ALIAS="$(hostname | cut -d. -f1 | sed 's/-[0-9]*$//' | cut -c1-10)"
+if [[ -f "${QUEUE_DIR}/host_alias" ]]; then
+    EXISTING_ALIAS=$(cat "${QUEUE_DIR}/host_alias")
+    log "Existing host alias: $EXISTING_ALIAS"
+    read -rp "  New alias (enter to keep '$EXISTING_ALIAS'): " HOST_ALIAS
+    HOST_ALIAS="${HOST_ALIAS:-$EXISTING_ALIAS}"
+else
+    read -rp "Short name for this host [default: $DEFAULT_ALIAS]: " HOST_ALIAS
+    HOST_ALIAS="${HOST_ALIAS:-$DEFAULT_ALIAS}"
+fi
+echo "$HOST_ALIAS" > "${QUEUE_DIR}/host_alias"
+log "Host alias: '$HOST_ALIAS' → ${QUEUE_DIR}/host_alias"
+
 if [[ ! -f "${HOPPER_DIR}/config.yaml" ]]; then
     log "Initialising Hopper project at $QUEUE_DIR ..."
     # hopper init creates .hopper/ in the current directory

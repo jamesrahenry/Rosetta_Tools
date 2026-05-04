@@ -17,7 +17,15 @@
 
 set -uo pipefail
 
-IDENTITY="gpu:$(hostname)"
+# Use ~/rosetta_queue/host_alias for a short name if the file exists;
+# fall back to the raw hostname (which can be long on cluster nodes).
+_alias_file="$HOME/rosetta_queue/host_alias"
+if [[ -f "$_alias_file" ]]; then
+    _host=$(tr -d '[:space:]' < "$_alias_file")
+else
+    _host=$(hostname)
+fi
+IDENTITY="gpu:${_host}"
 POLL_INTERVAL=30      # seconds between polls when idle
 LOG_DIR="${HOME}/gpu_runs"
 MIN_DISK_GIB=15
