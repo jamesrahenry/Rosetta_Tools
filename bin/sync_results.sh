@@ -83,7 +83,7 @@ while IFS= read -r line; do
     fi
 
     # 1. Non-JSON files: rsync directly to DEST, newer wins
-    rsync -az --update \
+    rsync -avz --update \
         --exclude='*.json' \
         "${RSYNC_EXCLUDES[@]}" \
         "$source" "$DEST/" 2>/dev/null \
@@ -91,7 +91,7 @@ while IFS= read -r line; do
         || log "  ⚠ rsync (non-JSON) failed for $alias"
 
     # 2. JSON files only: fetch to temp dir for merge
-    rsync -az \
+    rsync -avz \
         --include='*/' --include='*.json' --exclude='*' \
         "$source" "$tmpdir/" 2>/dev/null \
         && log "  JSON files fetched for merge" \
