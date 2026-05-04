@@ -75,7 +75,18 @@ purge_hf_cache() {
     fi
 }
 
+ensure_data_dirs() {
+    local dirs=(
+        "$HOME/rosetta_data/models"
+        "$HOME/rosetta_data/results"
+    )
+    for d in "${dirs[@]}"; do
+        [[ -d "$d" ]] || { mkdir -p "$d"; log "  created $d"; }
+    done
+}
+
 sync_repos() {
+    ensure_data_dirs
     # repo_path:clone_url pairs; rosetta_analysis is a symlink → Rosetta_Analysis
     declare -A REPO_URLS=(
         ["$HOME/rosetta_tools"]="https://github.com/jamesrahenry/rosetta_tools.git"
