@@ -3,40 +3,46 @@
 #
 # Run this script ONCE on each new GPU host. It:
 #   1. Verifies / installs Hopper
-#   2. Configures the GLOBAL ~/.hopper config with the Rosetta_Program
-#      instance ID and upstream server — so 'hopper' works from any directory
+#   2. Creates a .hopper/ config in the chosen instance directory
 #   3. Generates a DID key for this host if one doesn't exist
 #   4. Prompts for a short host alias (shown in gpu_queue.sh beside running jobs)
 #   5. Clones rosetta_tools
 #   6. Prints the commands to run on the dev machine to approve this host
 #
-# ~/rosetta_queue/ is created only for host_alias and job logs.
-# No embedded .hopper/ — the global config handles everything.
+# Instance directory (--instance-dir):
+#   Where .hopper/ is created. Default is ~ (global ~/.hopper — hopper then
+#   works from any directory with no cd needed). Pass a custom path to keep the
+#   instance self-contained, e.g. ~/rosetta_queue or ~/chicken.
 #
 # Usage:
-#   bash setup_gpu_host.sh [--upstream-server URL]
+#   bash setup_gpu_host.sh [--instance-dir DIR] [--upstream-server URL]
 #
-# Written: 2026-05-04 20:15 UTC
+# Written: 2026-05-04 20:30 UTC
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Defaults — override via flags
+# Defaults
 # ---------------------------------------------------------------------------
 UPSTREAM_SERVER="https://hopper.henrynet.ca"
 ROSETTA_TOOLS_URL="https://github.com/jamesrahenry/rosetta_tools.git"
-QUEUE_DIR="${HOME}/rosetta_queue"
-GLOBAL_HOPPER_DIR="${HOME}/.hopper"
+QUEUE_DIR="${HOME}/rosetta_queue"   # always used for host_alias / hopper_dir
+INSTANCE_DIR="${HOME}"              # where .hopper/ lives; default = global
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --instance-dir)    INSTANCE_DIR="$2"; shift 2 ;;
         --upstream-server) UPSTREAM_SERVER="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: setup_gpu_host.sh [--upstream-server URL]"
+            echo "Usage: setup_gpu_host.sh [--instance-dir DIR] [--upstream-server URL]"
             exit 0 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
+
+# Expand ~ in INSTANCE_DIR if passed as a literal string
+INSTANCE_DIR="${INSTANCE_DIR/#\~/$HOME}"
+HOPPER_DIR="${INSTANCE_DIR}/.hopper"
 
 log() { echo "[setup $(date +%H:%M:%S)] $*"; }
 die() { echo "[ERROR] $*" >&2; exit 1; }
@@ -53,35 +59,23 @@ fi
 log "Hopper $(hopper --version 2>/dev/null || echo 'unknown')"
 
 # ---------------------------------------------------------------------------
-# 2. Configure global Hopper with Rosetta_Program instance + upstream server
-#
-# We patch ~/.hopper/config.yaml in-place so we don't clobber other fields
-# the user may have set. Python is guaranteed present (hopper requires it).
+# 2. Configure Hopper instance in INSTANCE_DIR
 # ---------------------------------------------------------------------------
-mkdir -p "$GLOBAL_HOPPER_DIR"
+mkdir -p "$HOPPER_DIR"
+log "Hopper instance → ${HOPPER_DIR}"
 
-# Ensure a base global config exists
-if [[ ! -f "${GLOBAL_HOPPER_DIR}/config.yaml" ]]; then
-    log "Initialising global Hopper config..."
-    hopper init --non-interactive 2>/dev/null || true
-fi
-
-log "Configuring global Hopper: instance=Rosetta_Program, upstream=${UPSTREAM_SERVER}"
 python3 - <<PYEOF
-import yaml, pathlib, sys
+import yaml, pathlib
 
-p = pathlib.Path.home() / ".hopper/config.yaml"
+p = pathlib.Path("${HOPPER_DIR}") / "config.yaml"
 cfg = yaml.safe_load(p.read_text()) if p.exists() else {}
 
-# Instance
-cfg.setdefault("instance", {})["id"]   = "Rosetta_Program"
-cfg.setdefault("instance", {})["name"] = "Rosetta_Program"
-
-# Upstream in the default profile
+cfg.setdefault("instance", {}).update({"id": "Rosetta_Program", "name": "Rosetta_Program"})
+cfg.setdefault("storage",  {}).update({"type": "markdown", "path": "${HOPPER_DIR}"})
 cfg.setdefault("profiles", {}).setdefault("default", {}) \
    .setdefault("upstream", {}).update({
        "server":       "${UPSTREAM_SERVER}",
-       "did_key_path": str(pathlib.Path.home() / ".hopper/did.key"),
+       "did_key_path": "${HOPPER_DIR}/did.key",
        "enabled":      True,
    })
 
@@ -90,16 +84,16 @@ print(f"  wrote {p}")
 PYEOF
 
 # ---------------------------------------------------------------------------
-# 3. Generate DID key for this host if not already present
+# 3. Generate DID key if not already present
 # ---------------------------------------------------------------------------
-if [[ ! -f "${GLOBAL_HOPPER_DIR}/did.key" ]]; then
+if [[ ! -f "${HOPPER_DIR}/did.key" ]]; then
     log "Generating DID key for ${HOSTNAME}..."
-    hopper upstream init
+    (cd "$INSTANCE_DIR" && hopper upstream init)
 else
-    log "DID key already exists at ${GLOBAL_HOPPER_DIR}/did.key"
+    log "DID key already exists at ${HOPPER_DIR}/did.key"
 fi
 
-DID=$(hopper upstream whoami 2>/dev/null || echo "<could not read DID>")
+DID=$(cd "$INSTANCE_DIR" && hopper upstream whoami 2>/dev/null || echo "<could not read DID>")
 log "This host's DID: $DID"
 
 # ---------------------------------------------------------------------------
@@ -118,7 +112,15 @@ else
     HOST_ALIAS="${HOST_ALIAS:-$DEFAULT_ALIAS}"
 fi
 echo "$HOST_ALIAS" > "${QUEUE_DIR}/host_alias"
-log "Host alias: '$HOST_ALIAS' → ${QUEUE_DIR}/host_alias"
+log "Host alias: '$HOST_ALIAS'"
+
+# Write instance dir for the daemon (only needed when non-global)
+if [[ "$INSTANCE_DIR" != "$HOME" ]]; then
+    echo "$INSTANCE_DIR" > "${QUEUE_DIR}/hopper_dir"
+    log "Instance dir recorded → ${QUEUE_DIR}/hopper_dir"
+else
+    rm -f "${QUEUE_DIR}/hopper_dir"   # global config; daemon needs no cd
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Clone / update rosetta_tools
@@ -138,6 +140,16 @@ pip install --quiet -e "${HOME}/rosetta_tools" \
 # ---------------------------------------------------------------------------
 # 6. Print approval steps
 # ---------------------------------------------------------------------------
+
+# Build the cd prefix for manual hopper commands (empty if global)
+if [[ "$INSTANCE_DIR" != "$HOME" ]]; then
+    CD_PREFIX="cd ${INSTANCE_DIR} && "
+    CD_NOTE=" (must be in ${INSTANCE_DIR})"
+else
+    CD_PREFIX=""
+    CD_NOTE=" (works from any directory)"
+fi
+
 echo ""
 echo "======================================================================"
 echo "  NEXT STEPS — approve this host from the dev machine"
@@ -146,12 +158,12 @@ echo ""
 echo "  DEV machine (~/Source/Rosetta_Program):"
 echo "    hopper upstream invite create -n Rosetta_Program"
 echo ""
-echo "  THIS host — after receiving the token:"
-echo "    hopper upstream redeem <TOKEN>"
-echo "    hopper sync"
+echo "  THIS host — after receiving the token${CD_NOTE}:"
+echo "    ${CD_PREFIX}hopper upstream redeem <TOKEN>"
+echo "    ${CD_PREFIX}hopper sync"
 echo ""
 echo "  Verify:"
-echo "    hopper task list --tag gpu-job --compact"
+echo "    ${CD_PREFIX}hopper task list --tag gpu-job --compact"
 echo ""
 echo "======================================================================"
 echo ""

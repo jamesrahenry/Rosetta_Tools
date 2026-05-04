@@ -17,6 +17,14 @@
 
 set -uo pipefail
 
+# If setup_gpu_host.sh stored a non-global hopper instance directory, cd there
+# so hopper auto-detects the embedded .hopper/ config. With global config (~/.hopper)
+# this file is absent and we stay in the working directory.
+_hopper_dir_file="$HOME/rosetta_queue/hopper_dir"
+if [[ -f "$_hopper_dir_file" ]]; then
+    cd "$(cat "$_hopper_dir_file")"
+fi
+
 # Use ~/rosetta_queue/host_alias for a short name if the file exists;
 # fall back to the raw hostname (which can be long on cluster nodes).
 _alias_file="$HOME/rosetta_queue/host_alias"
