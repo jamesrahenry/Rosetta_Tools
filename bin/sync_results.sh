@@ -149,6 +149,21 @@ def merge_json(objs):
     if len(objs) == 1:
         return objs[0]
 
+    # Top-level list (e.g. gem_adaptive_width results): union records by content
+    if all(isinstance(o, list) for o in objs):
+        seen, merged_list = {}, []
+        for o in objs:
+            for rec in o:
+                k = record_key(rec)
+                if k not in seen:
+                    seen[k] = True
+                    merged_list.append(rec)
+        return merged_list
+
+    # Mixed or non-dict: fall back to newest
+    if not all(isinstance(o, dict) for o in objs):
+        return max((o for o in objs if isinstance(o, dict)), key=written_ts, default=objs[-1])
+
     for key in ("pair_results", "results"):
         if all(isinstance(o.get(key), list) for o in objs):
             seen, merged_list = {}, []
