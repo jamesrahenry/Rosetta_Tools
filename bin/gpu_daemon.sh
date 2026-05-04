@@ -24,6 +24,7 @@ MIN_DISK_GIB=15
 MAX_RETRIES=2         # auto-retry failed jobs this many times before marking blocked
 RETRY_DELAY=60        # seconds before re-queuing unknown/infrastructure failures
 RETRY_DELAY_FAST=15   # seconds before re-queuing transient network failures
+CLAIM_VERIFY_JITTER=5 # max seconds of random delay after claiming, before re-reading to verify ownership
 
 mkdir -p "$LOG_DIR"
 DAEMON_LOG="$LOG_DIR/daemon.log"
@@ -176,6 +177,38 @@ resolve_blocked() {
 }
 
 # ---------------------------------------------------------------------------
+# Atomic claim with verify — safe for multiple concurrent daemons.
+#
+# Strategy: claim locally → push (sync) → jitter → pull (sync) → re-read
+# assigned_to. If another daemon's sync arrived after ours, it wins;
+# we detect this and return 1 so the caller skips the task gracefully.
+# Returns 0 (we own it, proceed) or 1 (lost race or task changed, skip).
+# ---------------------------------------------------------------------------
+
+claim_with_verify() {
+    local task_id="$1"
+
+    hopper task status "$task_id" in_progress --assign "$IDENTITY" -f
+    sync_hopper                                          # push our claim
+    sleep $(( RANDOM % CLAIM_VERIFY_JITTER + 1 ))       # let concurrent claims land
+    sync_hopper                                          # pull latest
+
+    local owner; owner=$(hopper --json task get "$task_id" 2>/dev/null | jq -r '.assigned_to // empty')
+    if [[ "$owner" != "$IDENTITY" ]]; then
+        log "Lost claim race on $task_id (owned by '${owner:-unknown}') — skipping"
+        return 1
+    fi
+
+    local status; status=$(task_status "$task_id")
+    if [[ "$status" != "in_progress" ]]; then
+        log "Task $task_id became '$status' during claim verify — skipping"
+        return 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Failure classification — scan log to decide retry behaviour
 # Returns: "no_retry" | "retry_fast" | "retry_slow"
 # ---------------------------------------------------------------------------
@@ -229,8 +262,9 @@ run_job() {
     fi
 
     log "Claiming $task_id"
-    hopper task status "$task_id" in_progress --assign "$IDENTITY" -f
-    sync_hopper
+    if ! claim_with_verify "$task_id"; then
+        return 0   # lost race to another daemon — not an error
+    fi
 
     sync_repos
 
