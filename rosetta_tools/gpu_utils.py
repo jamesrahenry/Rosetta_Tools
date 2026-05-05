@@ -466,6 +466,24 @@ def disk_free_gib(path: str | None = None) -> float:
         return float("inf")
 
 
+_NEEDS_4BIT: set[str] = {
+    "Qwen/Qwen2.5-32B", "Qwen/Qwen2.5-32B-Instruct",
+    "mistralai/Mixtral-8x7B-v0.1", "mistralai/Mixtral-8x7B-Instruct-v0.1",
+}
+_4BIT_SIZE_PATTERNS = ["72b", "70b", "65b", "40b", "34b", "32b"]
+
+
+def requires_quantization(model_id: str) -> str | None:
+    """Return "4bit" if model_id is known to exceed L4 VRAM limits, else None."""
+    if model_id in _NEEDS_4BIT:
+        return "4bit"
+    lower = model_id.lower()
+    for pat in _4BIT_SIZE_PATTERNS:
+        if pat in lower:
+            return "4bit"
+    return None
+
+
 def load_model_with_retry(
     model_cls,
     model_id: str,
