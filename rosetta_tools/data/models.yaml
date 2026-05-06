@@ -114,6 +114,20 @@ models:
     tags: [scale]
     notes: "Cluster B null control."
 
+  - model_id: EleutherAI/pythia-1.4b
+    family: pythia
+    hidden_dim: 2048
+    n_layers: 24
+    vram_bf16: 2.9
+    cluster: B
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [framework-fig]
+    notes: "Framework paper Figure 1 specimen (sentiment). 2048-dim, 24 layers."
+
   - model_id: facebook/opt-1.3b
     family: opt
     hidden_dim: 2048
@@ -578,6 +592,9 @@ models:
     notes: >
       Unusual synthetic textbook training. Only model (1/24) that violates
       universal concept ordering — suspected training data artifact.
+      credibility (L0) and plurality (L1) peak at embedding layer — tokenization-level
+      CAZes, not semantic assembly. Exclude from semantic CAZ/GEM statistics;
+      CIA embedding-CAZ framework will handle these.
 
   - model_id: mistralai/Mistral-Small-3.1-24B-Base-2503
     family: mistral
