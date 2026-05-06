@@ -1,13 +1,15 @@
 # rosetta_tools
 
-Shared tooling for the [Rosetta interpretability research program](https://github.com/jamesrahenry/Rosetta_Manifold).
+Shared tooling for the Rosetta interpretability research program.
 
 ---
 
 ## Install
 
+Pin to a release tag — unpinned `main` can change between installs:
+
 ```bash
-pip install git+https://github.com/jamesrahenry/Rosetta_Tools.git
+pip install git+https://github.com/jamesrahenry/Rosetta_Tools.git@v1.1.0
 ```
 
 Or for local development (editable):
@@ -22,79 +24,53 @@ pip install -e .
 
 ## Modules
 
-### `rosetta_tools.gpu_utils`
+Full API reference with signatures and examples: [`docs/api.md`](docs/api.md)
 
-Device selection, dtype resolution, VRAM reporting, and model teardown.
-Designed to be library-agnostic — works with HuggingFace and any other framework.
+| Module | Purpose |
+|---|---|
+| `rosetta_tools.gpu_utils` | Device selection, dtype policy, VRAM reporting, model teardown |
+| `rosetta_tools.extraction` | Contrastive activation extraction — raw HuggingFace, no TransformerLens |
+| `rosetta_tools.caz` | CAZ metric computation (S/C/v), boundary and region detection |
+| `rosetta_tools.dataset` | Load and validate JSONL contrastive pair datasets |
+| `rosetta_tools.alignment` | Procrustes rotation, cross-architecture concept alignment |
+| `rosetta_tools.ablation` | Directional ablation via forward hooks, KL divergence measurement |
+| `rosetta_tools.gem` | GEM (Geometric Evolution Map) node construction and diagnostics |
+| `rosetta_tools.models` | Central model and concept registry — all scripts import from here |
+| `rosetta_tools.probes` | Linear probe training and evaluation for concept directions |
+| `rosetta_tools.feature_tracker` | Cross-layer feature tracking via greedy cosine matching |
+| `rosetta_tools.manifold_detector` | Eigenvalue census with Marchenko-Pastur noise floor |
+| `rosetta_tools.reporting` | Load CAZ checkpoint JSONs into tidy DataFrames |
+| `rosetta_tools.tracking` | Optional MLflow experiment tracking (fails gracefully if unavailable) |
+| `rosetta_tools.viz` | Standard CAZ profile plots and peak heatmaps |
+| `rosetta_tools.dataset` | JSONL pair loading, validation, and summary |
+| `rosetta_tools.paths` | Canonical data path resolution (`ROSETTA_CONCEPTS_ROOT`, repo-relative fallback) |
 
-```python
-from rosetta_tools.gpu_utils import get_device, get_dtype, log_vram, release_model
-
-device = get_device()        # "cuda" or "cpu"
-dtype  = get_dtype(device)   # torch.float16 or torch.float32
-
-model = SomeModel.from_pretrained(model_id, torch_dtype=dtype).to(device)
-log_vram("after model load")
-
-# Between models — important on 4GB GPUs
-release_model(model)
-```
-
-### `rosetta_tools.caz`
-
-Concept Allocation Zone metric computation — no model library dependency.
-Feed in activation arrays, get S/C/v metrics and CAZ boundaries back.
-
-```python
-from rosetta_tools.caz import compute_layer_metrics, find_caz_boundary
-from rosetta_tools.extraction import extract_contrastive_activations
-
-layer_acts = extract_contrastive_activations(model, tokenizer, pos_texts, neg_texts)
-metrics    = compute_layer_metrics(layer_acts)
-boundary   = find_caz_boundary(metrics)
-
-print(f"CAZ peak: layer {boundary.caz_peak}, S={boundary.peak_separation:.3f}")
-```
-
-### `rosetta_tools.extraction`
-
-Model-agnostic activation extraction using raw HuggingFace `transformers`.
-No TransformerLens dependency. Works with any model supporting
-`output_hidden_states=True`.
+### Quick example
 
 ```python
 from transformers import AutoModel, AutoTokenizer
+from rosetta_tools.gpu_utils import get_device, get_dtype, release_model
 from rosetta_tools.extraction import extract_contrastive_activations
-from rosetta_tools.gpu_utils import get_device, get_dtype
+from rosetta_tools.caz import compute_layer_metrics, find_caz_regions_scored
+from rosetta_tools.dataset import load_pairs, texts_by_label
 
 device    = get_device()
 dtype     = get_dtype(device)
-tokenizer = AutoTokenizer.from_pretrained("gpt2-xl")
-model     = AutoModel.from_pretrained("gpt2-xl", torch_dtype=dtype).to(device)
+tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-1.4b")
+model     = AutoModel.from_pretrained("EleutherAI/pythia-1.4b", torch_dtype=dtype).to(device)
 model.eval()
 
-layer_acts = extract_contrastive_activations(
-    model, tokenizer,
-    pos_texts=["The evidence clearly shows...", ...],
-    neg_texts=["The evidence is mixed...", ...],
-    device=device,
-)
-# layer_acts: list of (pos_acts, neg_acts) tuples, one per layer
-```
+pairs    = load_pairs("credibility_pairs.jsonl")
+pos, neg = texts_by_label(pairs)
 
-### `rosetta_tools.dataset`
+layer_acts = extract_contrastive_activations(model, tokenizer, pos, neg, device=device)
+metrics    = compute_layer_metrics(layer_acts)
+profile    = find_caz_regions_scored(metrics)
 
-Load and validate JSONL contrastive pair datasets.
+for region in profile.regions:
+    print(f"CAZ peak layer {region.peak_layer}: S={region.peak_separation:.3f}, score={region.score:.3f}")
 
-```python
-from rosetta_tools.dataset import load_pairs, texts_by_label, validate_dataset
-
-# Validate before a long run
-issues = validate_dataset("data/credibility_pairs.jsonl")
-assert not issues, issues
-
-pairs     = load_pairs("data/credibility_pairs.jsonl")
-pos, neg  = texts_by_label(pairs)
+release_model(model)
 ```
 
 ---
@@ -105,7 +81,7 @@ pos, neg  = texts_by_label(pairs)
   `transformers`. TransformerLens has persistent compatibility issues with
   transformers 5.x that make it fragile for new model families.
 
-- **fp32 metrics always.** Activations may be extracted in fp16 for GPU efficiency,
+- **fp64 metrics always.** Activations may be extracted in fp16/bf16 for GPU efficiency,
   but all metric computation (Fisher normalization, PCA) uses float64 internally.
   This is critical — fp16 overflows in variance computation at deep layers of
   large models, silently producing wrong results.
@@ -118,8 +94,7 @@ pos, neg  = texts_by_label(pairs)
 
 ## Related
 
-- [Rosetta Manifold](https://github.com/jamesrahenry/Rosetta_Manifold) — empirical CAZ pipeline
-- [Concept Allocation Zone](https://github.com/jamesrahenry/Concept_Allocation_Zone) — theoretical framework
-- [Pop Goes the Easel](https://github.com/jamesrahenry/pop_goes_the_easel) — companion study
+- [Rosetta_Concept_Pairs](https://github.com/jamesrahenry/Rosetta_Concept_Pairs) — contrastive pair dataset (18 concepts, 38k records)
+- [Rosetta_Analysis](https://github.com/jamesrahenry/Rosetta_Analysis) — analysis scripts for CAZ, GEM, and PRH papers
 
 *jamesrahenry@henrynet.ca*
