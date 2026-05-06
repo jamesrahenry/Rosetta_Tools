@@ -255,10 +255,10 @@ models:
     encoding: sparse
     attention: gqa
     quantization: 4bit
-    enabled: true
+    enabled: false
     gated: false
     tags: [moe]
-    notes: "MoE at same dim/depth as confirmed dense models. Controlled MoE test. ~24GB at nf4."
+    notes: "MoE at same dim/depth as confirmed dense models. Controlled MoE test. ~24GB at nf4. Disabled: 93GB download fills L4 root filesystem (97GB total)."
 
   # ===========================================================================
   # CLUSTER D — 3584-dim
