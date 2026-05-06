@@ -2,7 +2,7 @@
 
 ## Canonical location
 
-This repository (`~/Source/rosetta_tools/`) is the canonical stem of `rosetta_tools`. The GitHub repo at `github.com/jamesrahenry/Rosetta_Tools` is a publish target, not a source of truth. Do not develop directly against the GitHub clone — develop here, then publish.
+Your local clone is the canonical stem of `rosetta_tools`. The GitHub repo at `github.com/jamesrahenry/Rosetta_Tools` is a publish target, not a source of truth. Do not develop directly against a secondary clone — develop in canonical, then publish.
 
 ## Why this matters
 
@@ -25,16 +25,15 @@ When a change in canonical needs to be visible to consumers:
    git push origin vX.Y.Z
    ```
 4. Update each consumer to point at the new tag:
-   - **CIA** — bump `rosetta-tools @ git+https://…/Rosetta_Tools.git@vX.Y.Z` in `pyproject.toml`.
-   - **Rosetta_Program** — `cd rosetta_tools && git checkout vX.Y.Z`, then commit the submodule pointer bump in the parent repo.
+   - Bump `rosetta-tools @ git+https://…/Rosetta_Tools.git@vX.Y.Z` in each consumer's `pyproject.toml`.
 5. Note the change in this file's version log below.
 
 ## Do not
 
 - Do not let any consumer reference unpinned `Rosetta_Tools.git` (no `@<ref>`). The unpinned form is a footgun.
-- Do not develop or commit inside a consumer's clone of `rosetta_tools` (for example, inside `Rosetta_Program/rosetta_tools/`). Those clones must only ever check out an existing tag from canonical.
+- Do not develop or commit inside a consumer's submodule clone of `rosetta_tools`. Those clones must only ever check out an existing tag from canonical.
 - Do not move tags after they are pushed. If a release is broken, cut a new tag.
-- Do not create sibling clones of canonical (for example, in `~/Source/Rosetta_Tools_dev/`). One canonical, one set of tags.
+- Do not create sibling clones of canonical. One canonical, one set of tags.
 
 ## Version log
 

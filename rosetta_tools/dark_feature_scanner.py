@@ -8,7 +8,7 @@ Usage:
     python -m rosetta_tools.dark_feature_scanner \
         --model EleutherAI/pythia-6.9b \
         --library feature_library/ \
-        --texts datasets/consensus_pairs/ \
+        --texts /path/to/Rosetta_Concept_Pairs/pairs/canonical/v1/ \
         --top-k 10 \
         --output dark_feature_labels.json
 """
