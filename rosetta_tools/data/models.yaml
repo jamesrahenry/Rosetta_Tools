@@ -518,10 +518,24 @@ models:
     encoding: redundant
     attention: mha
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
-    tags: []
-    notes: "Legacy. AutoModel: layers at .h"
+    tags: [validation-fig]
+    notes: "CAZ Validation paper baton-pass figure (fig_baton_pass.png). Uses output_hidden_states; layer .h access not needed."
+
+  - model_id: openai-community/gpt2-large
+    family: gpt2
+    hidden_dim: 1280
+    n_layers: 36
+    vram_bf16: 3.0
+    cluster: null
+    encoding: redundant
+    attention: mha
+    quantization: null
+    enabled: true
+    gated: false
+    tags: [validation-fig]
+    notes: "CAZ Validation paper caz_proof figure (fig_caz_proof.png). 36 layers, 1280-dim."
 
   - model_id: facebook/opt-350m
     family: opt
