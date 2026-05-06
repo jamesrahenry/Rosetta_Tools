@@ -1,0 +1,24 @@
+cff-version: "1.2.0"
+message: "If you use this software, please cite it as below."
+type: software
+title: rosetta_tools
+abstract: "Shared tooling for the Rosetta interpretability research program.
+  Provides activation extraction, CAZ metric computation, Procrustes alignment,
+  directional ablation, GEM construction, and model/concept registry for
+  cross-architecture mechanistic interpretability research."
+authors:
+  - family-names: Henry
+    given-names: James
+    email: jamesrahenry@henrynet.ca
+    orcid: "https://orcid.org/0009-0005-7126-9466"
+version: "1.1.0"
+date-released: "2026-04-28"
+license: MIT
+repository-code: "https://github.com/jamesrahenry/Rosetta_Tools"
+url: "https://github.com/jamesrahenry/Rosetta"
+keywords:
+  - mechanistic interpretability
+  - transformer language models
+  - concept probing
+  - activation extraction
+  - Procrustes alignment
