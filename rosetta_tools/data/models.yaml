@@ -339,10 +339,10 @@ models:
     encoding: sparse
     attention: gqa
     quantization: 4bit
-    enabled: true
+    enabled: false
     gated: false
     tags: []
-    notes: "~16GB at nf4. 64 layers is the deepest in the L4-runnable set."
+    notes: "Disabled: 64GB bf16 download fills 97GB root filesystem; even at 4bit (~16GB) the 64GB download leaves no headroom for other models."
 
   # ===========================================================================
   # CLUSTER G — 5376-dim  (Gemma 4 dense)
