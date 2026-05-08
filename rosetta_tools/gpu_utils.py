@@ -615,12 +615,14 @@ def load_model_with_retry(
         )
     try:
         return model_cls.from_pretrained(
-            model_id, dtype=dtype, device_map=effective_device_map, local_files_only=True,
+            model_id, torch_dtype=dtype, device_map=effective_device_map, local_files_only=True,
         )
-    except (ValueError, ImportError):
+    except (ValueError, ImportError, AttributeError, OSError):
+        # AttributeError: checkpoint_files=None when local cache is stale/incomplete
+        # OSError: local_files_only but file not found — fall back to network load
         return model_cls.from_pretrained(
-            model_id, dtype=dtype, local_files_only=True,
-        ).to(device)
+            model_id, torch_dtype=dtype, device_map=effective_device_map,
+        )
 
 
 def load_causal_lm(
