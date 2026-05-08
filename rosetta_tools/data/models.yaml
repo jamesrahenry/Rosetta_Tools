@@ -359,10 +359,10 @@ models:
     encoding: sparse
     attention: alternating
     quantization: 4bit
-    enabled: true
+    enabled: false
     gated: true
     tags: [instruct, rlhf-pair]
-    notes: "Gemma4 dense 31B. ~16GB at nf4. Gated. No zero-PCA pair at 5376-dim."
+    notes: "Disabled: transformers version incompatibility with Gemma4 tokenizer (extra_special_tokens list vs dict); also no zero-PCA pair at 5376-dim so no primary results contribution."
 
   # ===========================================================================
   # CLUSTER H — 2816-dim  (Gemma 4 MoE)
