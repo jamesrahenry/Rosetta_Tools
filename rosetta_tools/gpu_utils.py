@@ -368,11 +368,21 @@ def release_model(model, *, clear_cache: bool = True) -> None:
         returning pooled memory to the CUDA allocator.  Set to False only
         if loading a replacement model immediately.
     """
-    # Move all parameters to CPU before deletion to free CUDA tensors
-    try:
-        model.cpu()
-    except Exception:
-        pass
+    # Synchronize before freeing so all pending GPU ops complete.
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    # For non-quantized models, move to CPU first so CUDA tensors are freed
+    # synchronously.  BitsAndBytes Int8Params don't support .cpu() — skip it
+    # for quantized models to avoid silent failure leaving GPU memory pinned.
+    is_quantized = getattr(model, "is_quantized", False) or getattr(
+        model, "quantization_method", None
+    ) is not None
+    if not is_quantized:
+        try:
+            model.cpu()
+        except Exception:
+            pass
     del model
     gc.collect()
     if clear_cache and torch.cuda.is_available():
