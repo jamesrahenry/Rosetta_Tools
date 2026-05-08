@@ -596,9 +596,10 @@ def load_model_with_retry(
             local_files_only=True,
         )
     if load_in_8bit:
+        from transformers import BitsAndBytesConfig as _BnBCfg
         return model_cls.from_pretrained(
             model_id,
-            load_in_8bit=True,
+            quantization_config=_BnBCfg(load_in_8bit=True),
             device_map=effective_device_map,
             local_files_only=True,
         )
