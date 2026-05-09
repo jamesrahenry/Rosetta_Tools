@@ -30,6 +30,13 @@ CONF="$(dirname "$DEST")/rosetta_queue/sync_hosts.conf"
 DRY_RUN=false
 RSYNC_EXCLUDES=(--exclude='*.npy' --exclude='*.pt' --exclude='*.bin' --exclude='*.safetensors')
 
+# Aggregate files that must never be overwritten by GPU-side regenerations.
+# New versioned files (e.g. gem_sweep_aggregate_n200.md) sync normally as they
+# don't exist locally yet; the canonical reference copy is protected here.
+PRESERVE_FILES=(
+    --exclude='gem_sweep_aggregate.md'
+)
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
@@ -83,9 +90,12 @@ while IFS= read -r line; do
     fi
 
     # 1. Non-JSON files: rsync directly to DEST, newer wins
+    #    PRESERVE_FILES are excluded to prevent GPU-side regenerations from
+    #    overwriting the canonical local reference copies.
     rsync -avz --update \
         --exclude='*.json' \
         "${RSYNC_EXCLUDES[@]}" \
+        "${PRESERVE_FILES[@]}" \
         "$source" "$DEST/" 2>/dev/null \
         && log "  non-JSON files updated" \
         || log "  ⚠ rsync (non-JSON) failed for $alias"
