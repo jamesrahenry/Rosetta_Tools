@@ -407,25 +407,25 @@ def purge_hf_cache(model_id: str) -> None:
         HuggingFace model ID (e.g. ``"EleutherAI/pythia-6.9b"``).
         Converted to the cache directory format (``models--org--name``).
     """
-    cache_root = Path.home() / ".cache" / "huggingface" / "hub"
-
     # HF cache uses models--<org>--<name> directory format
     cache_name = "models--" + model_id.replace("/", "--")
-    cache_dir = cache_root / cache_name
+
+    # Resolve cache root using HF env var priority order:
+    #   HF_HUB_CACHE > HUGGINGFACE_HUB_CACHE > HF_HOME/hub > ~/.cache/huggingface/hub
+    hub_cache = (
+        os.environ.get("HF_HUB_CACHE")
+        or os.environ.get("HUGGINGFACE_HUB_CACHE")
+        or (os.path.join(os.environ["HF_HOME"], "hub") if os.environ.get("HF_HOME") else None)
+        or str(Path.home() / ".cache" / "huggingface" / "hub")
+    )
+    cache_dir = Path(hub_cache) / cache_name
 
     if cache_dir.exists():
         size_gb = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file()) / 1024**3
         shutil.rmtree(cache_dir)
         print(f"Purged HF cache: {model_id} ({size_gb:.1f} GB freed)")
     else:
-        # Try HF_HOME env var
-        hf_home = os.environ.get("HF_HOME")
-        if hf_home:
-            cache_dir = Path(hf_home) / "hub" / cache_name
-            if cache_dir.exists():
-                size_gb = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file()) / 1024**3
-                shutil.rmtree(cache_dir)
-                print(f"Purged HF cache: {model_id} ({size_gb:.1f} GB freed)")
+        print(f"HF cache not found for {model_id} (checked {cache_dir})")
 
 
 # ---------------------------------------------------------------------------
