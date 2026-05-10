@@ -394,24 +394,23 @@ def release_model(model, *, clear_cache: bool = True) -> None:
         torch.cuda.empty_cache()
 
 
-def purge_hf_cache(model_id: str) -> None:
-    """Delete a HuggingFace model from the local cache.
+def purge_hf_cache(model_id: str, min_free_gb: float = 15.0) -> None:
+    """Delete a HuggingFace model from the local cache if disk space is low.
 
-    Useful when running many large models sequentially on disk-constrained
-    machines (e.g. cloud VMs). Call after extraction is complete and results
-    are saved — model weights are no longer needed.
+    Skips deletion when free space on the cache partition exceeds ``min_free_gb``,
+    allowing models to accumulate on disk-rich hosts (H200) while still cleaning
+    up automatically on constrained ones (L4 ~75 GB).
 
     Parameters
     ----------
     model_id:
         HuggingFace model ID (e.g. ``"EleutherAI/pythia-6.9b"``).
-        Converted to the cache directory format (``models--org--name``).
+    min_free_gb:
+        Only purge if free disk space is below this threshold (default 15 GB).
+        Pass ``0.0`` to always purge (original behaviour).
     """
-    # HF cache uses models--<org>--<name> directory format
     cache_name = "models--" + model_id.replace("/", "--")
 
-    # Resolve cache root using HF env var priority order:
-    #   HF_HUB_CACHE > HUGGINGFACE_HUB_CACHE > HF_HOME/hub > ~/.cache/huggingface/hub
     hub_cache = (
         os.environ.get("HF_HUB_CACHE")
         or os.environ.get("HUGGINGFACE_HUB_CACHE")
@@ -420,12 +419,19 @@ def purge_hf_cache(model_id: str) -> None:
     )
     cache_dir = Path(hub_cache) / cache_name
 
-    if cache_dir.exists():
-        size_gb = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file()) / 1024**3
-        shutil.rmtree(cache_dir)
-        print(f"Purged HF cache: {model_id} ({size_gb:.1f} GB freed)")
-    else:
+    if not cache_dir.exists():
         print(f"HF cache not found for {model_id} (checked {cache_dir})")
+        return
+
+    if min_free_gb > 0.0:
+        free_gb = shutil.disk_usage(hub_cache).free / 1024**3
+        if free_gb >= min_free_gb:
+            print(f"HF cache kept: {model_id} ({free_gb:.1f} GB free >= {min_free_gb:.0f} GB threshold)")
+            return
+
+    size_gb = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file()) / 1024**3
+    shutil.rmtree(cache_dir)
+    print(f"Purged HF cache: {model_id} ({size_gb:.1f} GB freed)")
 
 
 # ---------------------------------------------------------------------------
