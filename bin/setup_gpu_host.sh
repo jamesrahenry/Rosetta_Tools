@@ -72,12 +72,15 @@ cfg = yaml.safe_load(p.read_text()) if p.exists() else {}
 
 cfg.setdefault("instance", {}).update({"id": "Rosetta_Program", "name": "Rosetta_Program"})
 cfg.setdefault("storage",  {}).update({"type": "markdown", "path": "${HOPPER_DIR}"})
-cfg.setdefault("profiles", {}).setdefault("default", {}) \
-   .setdefault("upstream", {}).update({
-       "server":       "${UPSTREAM_SERVER}",
-       "did_key_path": "${HOPPER_DIR}/did.key",
-       "enabled":      True,
-   })
+profile = cfg.setdefault("profiles", {}).setdefault("default", {})
+# Workaround: fresh installs default to mode: server which breaks hopper sync.
+# Force local mode until hopper fixes the default (hopper issue t10ee10fb).
+profile["mode"] = "local"
+profile.setdefault("upstream", {}).update({
+    "server":       "${UPSTREAM_SERVER}",
+    "did_key_path": "${HOPPER_DIR}/did.key",
+    "enabled":      True,
+})
 
 p.write_text(yaml.dump(cfg, default_flow_style=False))
 print(f"  wrote {p}")
