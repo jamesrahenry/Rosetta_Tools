@@ -98,7 +98,7 @@ sync_repos() {
         ["$HOME/rosetta_tools"]="https://github.com/jamesrahenry/rosetta_tools.git"
         ["$HOME/Rosetta_Analysis"]="https://github.com/jamesrahenry/Rosetta_Analysis.git"
         ["$HOME/Rosetta_Concept_Pairs"]="https://github.com/jamesrahenry/Rosetta_Concept_Pairs.git"
-        ["$HOME/Concept_Integrity_Auditor"]="https://github.com/james-henry-git/Concept_Integrity_Auditor.git"
+        ["$HOME/Concept_Integrity_Auditor"]="git@github.com:VectorInstitute/Concept_Integrity_Auditor.git"
     )
 
     for repo in "${!REPO_URLS[@]}"; do
