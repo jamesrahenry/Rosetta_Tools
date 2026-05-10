@@ -125,10 +125,9 @@ sync_repos() {
         else
             log "  ⚠ pull skipped (diverged): $name"
         fi
-        # Skip auto-pip-install for CIA — it owns its own uv-managed .venv
-        # which the job command provisions via `uv sync`. Forcing pip install
-        # into the daemon's env risks dependency conflicts and is unnecessary.
-        if [[ -f "$repo/pyproject.toml" && "$name" != "Concept_Integrity_Auditor" ]]; then
+        # Skip auto-pip-install for uv-managed repos — their deps are in their
+        # own .venv (provisioned below). Forcing pip install risks conflicts.
+        if [[ -f "$repo/pyproject.toml" && "$name" != "Concept_Integrity_Auditor" && "$name" != "Rosetta_Analysis" ]]; then
             pip install -q -e "$repo" 2>/dev/null && log "  reinstalled $name"
         fi
     done
@@ -137,6 +136,13 @@ sync_repos() {
     if [[ ! -e "$HOME/rosetta_analysis" && -d "$HOME/Rosetta_Analysis" ]]; then
         ln -s "$HOME/Rosetta_Analysis" "$HOME/rosetta_analysis"
         log "  created symlink rosetta_analysis → Rosetta_Analysis"
+    fi
+
+    # Sync rosetta_analysis venv and put it on PATH so job `python` calls use it
+    local ra="$HOME/rosetta_analysis"
+    if [[ -f "$ra/pyproject.toml" ]] && command -v uv &>/dev/null; then
+        (cd "$ra" && uv sync --frozen -q 2>/dev/null) && log "  uv sync: rosetta_analysis"
+        export PATH="$ra/.venv/bin:$PATH"
     fi
 
     python -c "import rosetta_tools" 2>/dev/null || { log "rosetta_tools missing — installing"; pip install -q -e "$HOME/rosetta_tools"; }
