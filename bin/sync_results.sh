@@ -92,19 +92,21 @@ while IFS= read -r line; do
     # 1. Non-JSON files: rsync directly to DEST, newer wins
     #    PRESERVE_FILES are excluded to prevent GPU-side regenerations from
     #    overwriting the canonical local reference copies.
-    rsync -avz --update \
+    rsync -az --update \
+        --out-format="  %n" \
         --exclude='*.json' \
         "${RSYNC_EXCLUDES[@]}" \
         "${PRESERVE_FILES[@]}" \
         "$source" "$DEST/" 2>/dev/null \
-        && log "  non-JSON files updated" \
+        && log "  non-JSON sync done" \
         || log "  ⚠ rsync (non-JSON) failed for $alias"
 
     # 2. JSON files only: fetch to temp dir for merge
-    rsync -avz \
+    rsync -az \
+        --out-format="  %n" \
         --include='*/' --include='*.json' --exclude='*' \
         "$source" "$tmpdir/" 2>/dev/null \
-        && log "  JSON files fetched for merge" \
+        && log "  JSON sync done" \
         || log "  ⚠ rsync (JSON) failed for $alias"
 
 done < "$CONF"
