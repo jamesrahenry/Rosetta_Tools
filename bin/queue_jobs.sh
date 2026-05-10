@@ -49,8 +49,18 @@ COMPLETED_IDS=()   # IDs of all tasks in phases before the last barrier
 BARRIER_IDS=()     # IDs of tasks in the current phase (reset at each barrier)
 AFTER_BARRIER=false
 
+# Strip inline HF cache cleanup from job commands — the daemon handles cache
+# eviction based on disk pressure, so unconditional rm -rf is redundant and
+# wastes download time on machines with ample storage (e.g. H200 with 660 GiB).
+strip_hf_cleanup() {
+    # Removes trailing: ; rm -rf /tmp/HF/hub/models--...  ~/.cache/huggingface/... 2>/dev/null; true
+    # The /tmp/HF prefix is the sentinel — both cache dirs always appear together.
+    echo "$1" | sed 's/; rm -rf \/tmp\/HF\/hub\/models--.*$//'
+}
+
 add_task() {
     local title="$1" cmd="$2" status="$3" deps="$4"
+    cmd=$(strip_hf_cleanup "$cmd")
     local description="$cmd"
     [[ -n "$deps" ]] && description="$cmd ### depends:$deps"
 
