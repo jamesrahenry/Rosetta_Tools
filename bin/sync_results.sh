@@ -201,6 +201,10 @@ def merge_json(objs):
         base["_merged_from"] = aliases
         return base
 
+    # For extraction files with n_pairs: prefer higher n_pairs, then newer timestamp.
+    if any("n_pairs" in o for o in objs):
+        return max(objs, key=lambda o: (o.get("n_pairs", 0), written_ts(o)))
+
     return max(objs, key=written_ts)
 
 all_rel = set()
