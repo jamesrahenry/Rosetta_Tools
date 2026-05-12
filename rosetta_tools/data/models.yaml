@@ -749,14 +749,14 @@ models:
     hidden_dim: 2816
     n_layers: 30
     vram_bf16: 52.0
-    cluster: null
+    cluster: H
     encoding: sparse
     attention: alternating
     quantization: 4bit
-    enabled: false
+    enabled: true
     gated: true
     tags: [moe, rlhf-pair]
-    notes: "Base variant of gemma-4-26B-A4B-it. Disabled — rlhf-pair reference only."
+    notes: "Base variant of gemma-4-26B-A4B-it. Cluster H, same-dim PRH pair."
 
   - model_id: google/gemma-4-31B
     family: gemma4
