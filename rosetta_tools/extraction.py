@@ -31,7 +31,12 @@ import warnings
 from typing import Literal
 
 import numpy as np
-import torch
+try:
+    import torch
+except ImportError as _e:
+    raise ImportError(
+        "rosetta_tools.extraction requires torch. Install it with: pip install torch"
+    ) from _e
 from numpy.typing import NDArray
 
 warnings.filterwarnings("ignore")

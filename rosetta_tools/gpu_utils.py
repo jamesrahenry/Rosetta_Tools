@@ -62,7 +62,12 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import numpy as np
-import torch
+try:
+    import torch
+except ImportError as _e:
+    raise ImportError(
+        "rosetta_tools.gpu_utils requires torch. Install it with: pip install torch"
+    ) from _e
 
 # ---------------------------------------------------------------------------
 # HuggingFace download filtering  (2026-04-10)

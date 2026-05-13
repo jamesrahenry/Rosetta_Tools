@@ -22,7 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import torch
+try:
+    import torch
+except ImportError as _e:
+    raise ImportError(
+        "rosetta_tools.dark_feature_scanner requires torch. Install it with: pip install torch"
+    ) from _e
 from numpy.typing import NDArray
 
 log = logging.getLogger(__name__)

@@ -39,8 +39,13 @@ Typical usage
 from __future__ import annotations
 
 import numpy as np
-import torch
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn.functional as F
+except ImportError as _e:
+    raise ImportError(
+        "rosetta_tools.ablation requires torch. Install it with: pip install torch"
+    ) from _e
 from numpy.typing import NDArray
 
 
