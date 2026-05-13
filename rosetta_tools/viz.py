@@ -1,14 +1,8 @@
 """
-viz.py — Matplotlib helpers for CAZ and alignment visualizations.
+viz.py — Matplotlib file-writing helpers for CAZ and alignment visualizations.
 
-All plotting functions accept pandas DataFrames produced by
-``rosetta_tools.reporting`` and write PNG files to disk.
-
-Concept metadata
-----------------
-CONCEPT_META maps concept names to display type and color:
-    type: epistemic | affective | relational | syntactic
-    color: hex string for consistent cross-plot coloring
+Sets the Agg backend — not safe to import in interactive notebooks.
+For style constants and apply_theme(), use rosetta_tools.viz_style instead.
 
 Typical usage
 -------------
@@ -46,64 +40,19 @@ plt.rcParams.update(
         "axes.grid": True,
         "grid.alpha": 0.25,
         "figure.dpi": 150,
+        "figure.facecolor": "white",
     }
 )
 
-# ---------------------------------------------------------------------------
-# Concept metadata
-# ---------------------------------------------------------------------------
-
-CONCEPT_META: dict[str, dict] = {
-    # Colors and types kept in sync with rosetta_analysis/viz/viz_style.py.
-    # If they ever diverge, viz_style.py is authoritative — update here to match.
-    # epistemic
-    "credibility":    {"type": "epistemic",  "color": "#7B1FA2"},
-    "certainty":      {"type": "epistemic",  "color": "#AD1457"},
-    "deception":      {"type": "epistemic",  "color": "#351498"},
-    "sarcasm":        {"type": "epistemic",  "color": "#986714"},
-    "specificity":    {"type": "epistemic",  "color": "#144F98"},
-    "formality":      {"type": "epistemic",  "color": "#148A98"},
-    # affective
-    "sentiment":      {"type": "affective",  "color": "#2E7D32"},
-    "moral_valence":  {"type": "affective",  "color": "#00695C"},
-    "urgency":        {"type": "affective",  "color": "#981487"},
-    "threat_severity":{"type": "affective",  "color": "#149852"},
-    # relational
-    "causation":      {"type": "relational", "color": "#E65100"},
-    "temporal_order": {"type": "relational", "color": "#827717"},
-    "agency":         {"type": "relational", "color": "#339814"},
-    # syntactic
-    "negation":       {"type": "syntactic",  "color": "#C62828"},
-    "plurality":      {"type": "syntactic",  "color": "#809814"},
-    # security
-    "authorization":  {"type": "security",   "color": "#143098"},
-    "exfiltration":   {"type": "security",   "color": "#599814"},
-}
-
-TYPE_COLORS = {
-    "epistemic":  "#7B1FA2",
-    "affective":  "#2E7D32",
-    "relational": "#E65100",
-    "syntactic":  "#C62828",
-    "security":   "#143098",
-}
-
-TYPE_BG = {
-    "epistemic":  "#EDE7F6",
-    "affective":  "#E8F5E9",
-    "relational": "#FFF3E0",
-    "syntactic":  "#E3F2FD",
-    "security":   "#E8EAF6",
-}
-
-CONCEPT_ORDER = [
-    "temporal_order", "causation", "agency",              # relational
-    "negation", "plurality",                               # syntactic
-    "sentiment", "moral_valence", "urgency", "threat_severity",  # affective
-    "certainty", "credibility", "deception", "sarcasm",   # epistemic
-    "specificity", "formality",                            # epistemic (stylistic)
-    "authorization", "exfiltration",                       # security
-]
+# Re-export style constants so existing `from rosetta_tools.viz import CONCEPT_META`
+# imports keep working.
+from rosetta_tools.viz_style import (  # noqa: E402, F401
+    CONCEPT_META, CONCEPT_ORDER, TYPE_COLORS, TYPE_BG,
+    CONCEPT_COLORS, CONCEPT_TYPE, CONCEPTS, concept_color,
+    FAMILY_COLORS, FAMILY_MAP, FAMILY_ORDER,
+    CAZ_CAT_COLORS, CAZ_CAT_FILL, CAZ_CAT_LABELS, caz_score_cat,
+    THEME, apply_theme,
+)
 
 
 # ---------------------------------------------------------------------------
