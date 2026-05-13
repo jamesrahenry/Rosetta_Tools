@@ -22,24 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-extract = [
-    "torch>=2.0",
-    "transformers>=4.40",
-    "accelerate>=0.26",
-    "huggingface_hub>=0.20",
-]
-quantize = [
-    "rosetta_tools[extract]",
-    "bitsandbytes>=0.41",
-]
-tracking = [
-    "mlflow>=2.10",
-]
-all = [
-    "rosetta_tools[extract,quantize,tracking]",
-]
 dev = [
-    "rosetta_tools[all]",
     "pytest>=7.0",
     "pytest-asyncio",
 ]
