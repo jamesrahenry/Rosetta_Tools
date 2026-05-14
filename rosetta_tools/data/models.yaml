@@ -1,5 +1,5 @@
 # models.yaml — Rosetta model registry
-# Updated: 2026-04-22 UTC
+# Updated: 2026-05-13 UTC
 #
 # Fields
 # ------
@@ -61,7 +61,7 @@ models:
     encoding: redundant
     attention: mha
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: []
     notes: "ALiBi positional encoding. Cluster A null control — skip in favour of gpt2."
@@ -89,7 +89,7 @@ models:
     encoding: redundant
     attention: mha
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: []
     notes: "Learned positions. Cluster A null control — skip in favour of gpt2/pythia."
@@ -137,7 +137,7 @@ models:
     encoding: redundant
     attention: mha
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: []
     notes: "Cluster B — redundant with pythia-1b."
@@ -151,7 +151,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: true
     tags: []
     notes: "Gated. Sparse encoder in 2048-dim — interesting architecture contrast with pythia-1b but flat CAZ."
@@ -560,7 +560,7 @@ models:
     encoding: redundant
     attention: mha
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: []
 
@@ -573,7 +573,7 @@ models:
     encoding: sparse
     attention: alternating
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: []
     notes: "Extreme sparse encoder — alternating local/global attn; cos-threshold has no effect on feature count."
@@ -587,7 +587,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: true
     tags: []
 
@@ -600,7 +600,7 @@ models:
     encoding: redundant
     attention: mha
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: []
     notes: >
@@ -618,11 +618,11 @@ models:
     cluster: null
     encoding: sparse
     attention: gqa
-    quantization: null
-    enabled: false
+    quantization: 4bit
+    enabled: true
     gated: false
     tags: []
-    notes: "48GB bf16 — tight across 2x L4. Not yet run."
+    notes: "48GB bf16 — too large for 2x L4. Runs at ~12GB nf4 (4bit)."
 
   # Instruct pairs — disabled by default, used for RLHF geometry audit
 
@@ -635,7 +635,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: [instruct, rlhf-pair]
 
@@ -648,7 +648,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: [instruct, rlhf-pair]
 
@@ -661,7 +661,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: [instruct, rlhf-pair]
 
@@ -674,7 +674,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: [instruct, rlhf-pair]
 
@@ -687,7 +687,7 @@ models:
     encoding: sparse
     attention: alternating
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: [instruct, rlhf-pair]
 
@@ -700,7 +700,7 @@ models:
     encoding: sparse
     attention: alternating
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: [instruct, rlhf-pair]
     notes: "Use device_map=auto across 2x L4."
@@ -714,7 +714,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: true
     tags: [instruct, rlhf-pair]
 
@@ -727,7 +727,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: true
     tags: [instruct, rlhf-pair]
 
@@ -740,7 +740,7 @@ models:
     encoding: sparse
     attention: gqa
     quantization: null
-    enabled: false
+    enabled: true
     gated: false
     tags: [instruct, rlhf-pair]
 
