@@ -379,10 +379,10 @@ models:
     encoding: sparse
     attention: alternating
     quantization: 4bit
-    enabled: true
+    enabled: false
     gated: true
     tags: [moe, instruct, rlhf-pair]
-    notes: "Gemma4 MoE, 128 experts / top-8 active, hidden_dim=2816. ~13GB at nf4. Gated."
+    notes: "Disabled: 52GB bf16 download fills L4 root filesystem (~97GB total) even at nf4. Re-enable on larger-disk host."
 
   # ===========================================================================
   # CLUSTER F — 8192-dim  (frontier, H200 only)
@@ -753,10 +753,10 @@ models:
     encoding: sparse
     attention: alternating
     quantization: 4bit
-    enabled: true
+    enabled: false
     gated: true
     tags: [moe, rlhf-pair]
-    notes: "Base variant of gemma-4-26B-A4B-it. Cluster H, same-dim PRH pair."
+    notes: "Disabled: 52GB bf16 download fills L4 root filesystem. Re-enable on larger-disk host."
 
   - model_id: google/gemma-4-31B
     family: gemma4
