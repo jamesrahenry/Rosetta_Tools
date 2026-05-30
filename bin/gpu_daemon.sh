@@ -34,6 +34,17 @@ else
     _host=$(hostname)
 fi
 IDENTITY="gpu:${_host}"
+
+# GPU count for capability matching. Jobs tagged `gpusN` require >= N GPUs;
+# this daemon only claims jobs whose requirement it can satisfy. A job with no
+# `gpusN` tag needs 1 (runs anywhere). Jobs tagged `host-<name>` only run on the
+# host whose alias/hostname matches $_host. Prevents a 1-GPU box from grabbing
+# a 2-GPU job (the recurring Vector-cluster annoyance).
+if command -v nvidia-smi >/dev/null 2>&1; then
+    MY_GPUS=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ')
+fi
+[[ "${MY_GPUS:-0}" -ge 1 ]] 2>/dev/null || MY_GPUS=1
+
 POLL_INTERVAL=30      # seconds between polls when idle
 LOG_DIR="${HOME}/gpu_runs"
 MIN_DISK_GIB=15
@@ -424,7 +435,8 @@ reclaim_interrupted() {
 # Main loop
 # ---------------------------------------------------------------------------
 
-log "Starting — identity: $IDENTITY"
+log "Starting — identity: $IDENTITY (${MY_GPUS} GPU$([[ $MY_GPUS -ne 1 ]] && echo s))"
+log "Claims jobs needing <= ${MY_GPUS} GPU(s); skips gpusN jobs with N > ${MY_GPUS} and host-* pins for other hosts"
 log "Polling every ${POLL_INTERVAL}s for open gpu-job tasks"
 log "Logs → $LOG_DIR"
 log "Daemon log → $DAEMON_LOG  (tail -f to follow)"
@@ -440,8 +452,18 @@ while true; do
         sync_hopper
 
         task_id=$(hopper --json task list --tag gpu-job --status open 2>/dev/null \
-            | jq -r '
-                map(. + {_pri: (
+            | jq -r --argjson mygpus "$MY_GPUS" --arg host "$_host" '
+                # Keep only jobs this host can run:
+                #  - capability: gpusN tag => needs >= N GPUs (absent => 1)
+                #  - host pin:   host-<name> tag => only that host (absent => any)
+                map(select(
+                    (((.tags // []) | map(select(test("^gpus[0-9]+$")))
+                      | if length > 0 then (.[0] | ltrimstr("gpus") | tonumber) else 1 end) <= $mygpus)
+                    and
+                    (((.tags // []) | map(select(startswith("host-")))) as $pins
+                      | ($pins | length == 0) or ($pins | any(. == ("host-" + $host))))
+                ))
+                | map(. + {_pri: (
                     if .priority == "critical" then 0
                     elif .priority == "high"   then 1
                     elif .priority == "medium" then 2

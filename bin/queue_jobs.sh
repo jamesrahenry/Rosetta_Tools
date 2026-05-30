@@ -22,13 +22,23 @@ set -uo pipefail
 DRY_RUN=false
 PRIORITY="medium"
 JOBS_FILE=""
+REQ_GPUS=""    # require >= N GPUs (adds gpusN tag); set by --require-gpus or "# @gpus N"
+PIN_HOST=""    # pin to a host (adds host-NAME tag); set by --host or "# @host NAME"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --dry-run)   DRY_RUN=true; shift ;;
-        --priority)  PRIORITY="$2"; shift 2 ;;
+        --dry-run)      DRY_RUN=true; shift ;;
+        --priority)     PRIORITY="$2"; shift 2 ;;
+        --require-gpus) REQ_GPUS="$2"; shift 2 ;;
+        --host)         PIN_HOST="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: queue_jobs.sh [--dry-run] [--priority <p>] JOBS_FILE"
+            echo "Usage: queue_jobs.sh [--dry-run] [--priority <p>] [--require-gpus N] [--host NAME] JOBS_FILE"
+            echo ""
+            echo "Capability/affinity (also settable inline per jobs file):"
+            echo "  --require-gpus N   tag jobs gpusN — only daemons with >= N GPUs claim them"
+            echo "  --host NAME        tag jobs host-NAME — only the host with that alias claims them"
+            echo "  # @gpus N          directive line: applies gpusN to following jobs (0/1 resets)"
+            echo "  # @host NAME       directive line: applies host-NAME to following jobs ('any' resets)"
             exit 0 ;;
         *)  JOBS_FILE="$1"; shift ;;
     esac
@@ -64,9 +74,14 @@ add_task() {
     local description="$cmd"
     [[ -n "$deps" ]] && description="$cmd ### depends:$deps"
 
+    local extra_tags=()
+    [[ -n "$REQ_GPUS" && "$REQ_GPUS" -gt 1 ]] 2>/dev/null && extra_tags+=(--tag "gpus${REQ_GPUS}")
+    [[ -n "$PIN_HOST" && "$PIN_HOST" != "any" ]] && extra_tags+=(--tag "host-${PIN_HOST}")
+
     hopper task add "$title" \
         --description "$description" \
         --tag gpu-job \
+        "${extra_tags[@]}" \
         --priority "$PRIORITY" \
         --status "$status" \
         --non-interactive 2>&1 \
@@ -81,6 +96,18 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         BARRIER_IDS=()
         AFTER_BARRIER=true
         echo ""
+        continue
+    fi
+
+    # Capability / affinity directives (applied to all following jobs)
+    if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*@gpus[[:space:]]+([0-9]+) ]]; then
+        REQ_GPUS="${BASH_REMATCH[1]}"
+        echo "[directive] require-gpus = $REQ_GPUS"
+        continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*@host[[:space:]]+([A-Za-z0-9_.-]+) ]]; then
+        PIN_HOST="${BASH_REMATCH[1]}"
+        echo "[directive] host pin = $PIN_HOST"
         continue
     fi
 
