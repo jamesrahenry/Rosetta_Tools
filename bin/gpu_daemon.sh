@@ -17,6 +17,16 @@
 
 set -uo pipefail
 
+# Activate the Python venv if hopper isn't already on PATH. The daemon is often
+# launched via `tmux new-session "bash gpu_daemon.sh"` — a non-interactive shell
+# that never sources ~/.bashrc, so hopper (installed in ~/venv) would be missing
+# and every hopper call would fail silently, leaving the daemon stuck on
+# "Queue empty" forever even with jobs waiting.
+if ! command -v hopper >/dev/null 2>&1 && [[ -f "$HOME/venv/bin/activate" ]]; then
+    # shellcheck disable=SC1091
+    source "$HOME/venv/bin/activate"
+fi
+
 # If setup_gpu_host.sh stored a non-global hopper instance directory, cd there
 # so hopper auto-detects the embedded .hopper/ config. With global config (~/.hopper)
 # this file is absent and we stay in the working directory.
