@@ -45,15 +45,20 @@ else
 fi
 IDENTITY="gpu:${_host}"
 
-# GPU count for capability matching. Jobs tagged `gpusN` require >= N GPUs;
-# this daemon only claims jobs whose requirement it can satisfy. A job with no
-# `gpusN` tag needs 1 (runs anywhere). Jobs tagged `host-<name>` only run on the
-# host whose alias/hostname matches $_host. Prevents a 1-GPU box from grabbing
-# a 2-GPU job (the recurring Vector-cluster annoyance).
+# Capability matching by total VRAM (GB). Jobs tagged `vramN` need >= N GB of
+# aggregate GPU memory; this daemon only claims jobs it can fit. What matters is
+# total VRAM, not GPU count — 1×40GB and 2×20GB are equivalent. A job with no
+# `vramN` tag has no requirement (runs anywhere). Jobs tagged `host-<name>` only
+# run on the host whose alias/hostname matches $_host. Prevents a small box from
+# grabbing a job that needs more memory than it has (the Vector-cluster annoyance).
 if command -v nvidia-smi >/dev/null 2>&1; then
     MY_GPUS=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ')
+    # Sum memory.total across all GPUs (MiB), convert to GB (MiB/1000, floored).
+    MY_VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+              | awk '{s+=$1} END{printf "%d", s/1000}')
 fi
 [[ "${MY_GPUS:-0}" -ge 1 ]] 2>/dev/null || MY_GPUS=1
+[[ "${MY_VRAM:-0}" -ge 1 ]] 2>/dev/null || MY_VRAM=0
 
 POLL_INTERVAL=30      # seconds between polls when idle
 LOG_DIR="${HOME}/gpu_runs"
@@ -445,8 +450,8 @@ reclaim_interrupted() {
 # Main loop
 # ---------------------------------------------------------------------------
 
-log "Starting — identity: $IDENTITY (${MY_GPUS} GPU$([[ $MY_GPUS -ne 1 ]] && echo s))"
-log "Claims jobs needing <= ${MY_GPUS} GPU(s); skips gpusN jobs with N > ${MY_GPUS} and host-* pins for other hosts"
+log "Starting — identity: $IDENTITY (${MY_GPUS} GPU$([[ $MY_GPUS -ne 1 ]] && echo s), ${MY_VRAM} GB VRAM)"
+log "Claims jobs needing <= ${MY_VRAM} GB VRAM; skips vramN jobs with N > ${MY_VRAM} and host-* pins for other hosts"
 log "Polling every ${POLL_INTERVAL}s for open gpu-job tasks"
 log "Logs → $LOG_DIR"
 log "Daemon log → $DAEMON_LOG  (tail -f to follow)"
@@ -462,13 +467,13 @@ while true; do
         sync_hopper
 
         task_id=$(hopper --json task list --tag gpu-job --status open 2>/dev/null \
-            | jq -r --argjson mygpus "$MY_GPUS" --arg host "$_host" '
+            | jq -r --argjson myvram "$MY_VRAM" --arg host "$_host" '
                 # Keep only jobs this host can run:
-                #  - capability: gpusN tag => needs >= N GPUs (absent => 1)
+                #  - capability: vramN tag => needs >= N GB total VRAM (absent => 0)
                 #  - host pin:   host-<name> tag => only that host (absent => any)
                 map(select(
-                    (((.tags // []) | map(select(test("^gpus[0-9]+$")))
-                      | if length > 0 then (.[0] | ltrimstr("gpus") | tonumber) else 1 end) <= $mygpus)
+                    (((.tags // []) | map(select(test("^vram[0-9]+$")))
+                      | if length > 0 then (.[0] | ltrimstr("vram") | tonumber) else 0 end) <= $myvram)
                     and
                     (((.tags // []) | map(select(startswith("host-")))) as $pins
                       | ($pins | length == 0) or ($pins | any(. == ("host-" + $host))))

@@ -13,15 +13,15 @@ hopper --json task list --tag gpu-job 2>/dev/null \
         sort_by(.created_at)
         | .[]
         | select(.status != "cancelled")
-        | (((.tags // []) | map(select(test("^gpus[0-9]+$")))
-            | if length > 0 then (.[0] | ltrimstr("gpus")) else "1" end)) as $g
+        | (((.tags // []) | map(select(test("^vram[0-9]+$")))
+            | if length > 0 then (.[0] | ltrimstr("vram") + "GB") else "-" end)) as $v
         | (((.tags // []) | map(select(startswith("host-")))
             | if length > 0 then ("@" + (.[0] | ltrimstr("host-"))) else "" end)) as $h
         | [
             .id[0:8],
             (if .status == "in_progress" then "running" else .status end),
             (if .assigned_to then (.assigned_to | split(":") | .[1:] | join(":")) else "-" end),
-            ($g + "gpu" + (if $h != "" then " " + $h else "" end)),
+            ($v + (if $h != "" then " " + $h else "" end)),
             .title
           ]
         | @tsv' \
