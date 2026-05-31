@@ -611,20 +611,19 @@ def load_model_with_retry(
     effective_device_map = device_map if device_map is not None else device
 
     # Multi-GPU device_map='auto' greedily fills GPU 0 with weights, leaving no
-    # headroom for activations — the global sweep's per-layer ablation forward
-    # passes then OOM on 9-14B models. Cap per-GPU weight memory (reserve ~5 GiB
-    # per GPU for activations) so weights spread evenly and the sweep fits.
+    # headroom for activations -> the global sweep's per-layer ablation forwards
+    # OOM on 9-14B models. Use 'balanced' instead: it splits weights EVENLY across
+    # GPUs (e.g. 14/14 GB for a 28 GB model), leaving ~(GPU - weights/N) free per
+    # GPU for activations. No max_memory ceiling — an artificial cap forced disk
+    # offload on the 28 GB Qwen-14B (real layers to disk -> sweep hangs).
     max_memory = None
     if effective_device_map == "auto":
         try:
             import torch as _t
-            _n = _t.cuda.device_count()
-            if _n > 1:
-                _per = _t.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-                _cap = max(1, int(_per - 5))
-                max_memory = {i: f"{_cap}GiB" for i in range(_n)}
+            if _t.cuda.is_available() and _t.cuda.device_count() > 1:
+                effective_device_map = "balanced"
         except Exception:
-            max_memory = None
+            pass
 
     if quantization_config is not None:
         return model_cls.from_pretrained(
