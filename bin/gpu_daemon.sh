@@ -479,7 +479,8 @@ while true; do
                       | ($pins | length == 0) or ($pins | any(. == ("host-" + $host))))
                 ))
                 | map(. + {_pri: (
-                    if .priority == "critical" then 0
+                    # Hopper scale is low/medium/high/urgent; "critical" kept for back-compat.
+                    if .priority == "urgent" or .priority == "critical" then 0
                     elif .priority == "high"   then 1
                     elif .priority == "medium" then 2
                     else 3 end
