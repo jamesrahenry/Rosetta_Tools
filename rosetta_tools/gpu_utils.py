@@ -609,11 +609,28 @@ def load_model_with_retry(
 
     # Phase 2: load from local cache — no network access.
     effective_device_map = device_map if device_map is not None else device
+
+    # Multi-GPU device_map='auto' greedily fills GPU 0 with weights, leaving no
+    # headroom for activations — the global sweep's per-layer ablation forward
+    # passes then OOM on 9-14B models. Cap per-GPU weight memory (reserve ~5 GiB
+    # per GPU for activations) so weights spread evenly and the sweep fits.
+    max_memory = None
+    if effective_device_map == "auto":
+        try:
+            import torch as _t
+            _n = _t.cuda.device_count()
+            if _n > 1:
+                _per = _t.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                _cap = max(1, int(_per - 5))
+                max_memory = {i: f"{_cap}GiB" for i in range(_n)}
+        except Exception:
+            max_memory = None
+
     if quantization_config is not None:
         return model_cls.from_pretrained(
             model_id,
             quantization_config=quantization_config,
-            device_map=effective_device_map,
+            device_map=effective_device_map, max_memory=max_memory,
             local_files_only=True,
         )
     if load_in_8bit:
@@ -621,18 +638,20 @@ def load_model_with_retry(
         return model_cls.from_pretrained(
             model_id,
             quantization_config=_BnBCfg(load_in_8bit=True),
-            device_map=effective_device_map,
+            device_map=effective_device_map, max_memory=max_memory,
             local_files_only=True,
         )
     try:
         return model_cls.from_pretrained(
-            model_id, torch_dtype=dtype, device_map=effective_device_map, local_files_only=True,
+            model_id, torch_dtype=dtype, device_map=effective_device_map,
+            max_memory=max_memory, local_files_only=True,
         )
     except (ValueError, ImportError, AttributeError, OSError):
         # AttributeError: checkpoint_files=None when local cache is stale/incomplete
         # OSError: local_files_only but file not found — fall back to network load
         return model_cls.from_pretrained(
             model_id, torch_dtype=dtype, device_map=effective_device_map,
+            max_memory=max_memory,
         )
 
 
