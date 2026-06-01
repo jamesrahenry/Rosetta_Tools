@@ -231,6 +231,75 @@ class DirectionalAblator:
             self._handle = None
 
 
+class DirectionalShifter:
+    """Context manager that ADDS a concept direction to a layer's hidden state —
+    an additive (steering) intervention, the counterpart to DirectionalAblator's
+    subtractive orthogonal projection.
+
+    h' = h + coefficient * shift_vector
+
+    Unlike DirectionalAblator, the shift vector is NOT normalised: pass the raw
+    centroid-difference (dom_vector) and a signed ``coefficient`` so that
+    coefficient=+1 translates activations by exactly one class-gap along the
+    concept axis (the "additive trench"), and coefficient=-1 pushes the opposite
+    way. Same tuple/dim handling as DirectionalAblator.
+
+    Parameters
+    ----------
+    layer_module: the transformer block to hook.
+    shift_vector: raw direction (e.g. dom_vector), shape [hidden_dim]. Not normalised.
+    coefficient: signed scale applied to shift_vector (default +1.0).
+    dtype: torch dtype for the shift tensor.
+    """
+
+    def __init__(self, layer_module, shift_vector, coefficient: float = 1.0,
+                 dtype: torch.dtype = torch.float32) -> None:
+        self._layer = layer_module
+        self._handle = None
+        self._coeff = float(coefficient)
+        self._shift = torch.tensor(shift_vector, dtype=dtype)  # raw, un-normalised
+
+    def _hook(self, module, input, output):
+        if isinstance(output, tuple):
+            hidden = None
+            hidden_idx = 0
+            target_dim = self._shift.shape[0]
+            for i, o in enumerate(output):
+                if isinstance(o, torch.Tensor) and o.dim() == 3 and o.shape[-1] == target_dim:
+                    hidden = o
+                    hidden_idx = i
+                    break
+            if hidden is None:
+                hidden = output[0]
+                hidden_idx = 0
+        else:
+            hidden = output
+            hidden_idx = None
+
+        dev = hidden.device
+        dt = hidden.dtype
+        s = self._shift.to(device=dev, dtype=dt)
+
+        if hidden.shape[-1] != s.shape[0]:
+            return output
+
+        # Additive shift: h' = h + coeff * shift  (broadcast over batch, seq).
+        shifted = hidden + self._coeff * s
+
+        if isinstance(output, tuple):
+            return output[:hidden_idx] + (shifted,) + output[hidden_idx + 1:]
+        return shifted
+
+    def __enter__(self):
+        self._handle = self._layer.register_forward_hook(self._hook)
+        return self
+
+    def __exit__(self, *_):
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+
+
 # ---------------------------------------------------------------------------
 # Evaluation helpers
 # ---------------------------------------------------------------------------
