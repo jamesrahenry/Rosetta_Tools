@@ -158,10 +158,22 @@ sync_repos() {
         fi
     done
 
-    # Ensure ~/rosetta_analysis symlink exists
-    if [[ ! -e "$HOME/rosetta_analysis" && -d "$HOME/Rosetta_Analysis" ]]; then
-        ln -s "$HOME/Rosetta_Analysis" "$HOME/rosetta_analysis"
-        log "  created symlink rosetta_analysis → Rosetta_Analysis"
+    # Ensure ~/rosetta_analysis is a SYMLINK to the daemon-synced ~/Rosetta_Analysis.
+    # Jobs `cd ~/rosetta_analysis`; the daemon only ever pulls ~/Rosetta_Analysis. If
+    # lowercase exists as a standalone real dir it silently SHADOWS the synced one and
+    # never updates → jobs run stale code (hit 2026-06-03: tainted quantized results).
+    # Repair that case here, but only when the synced capital checkout actually exists.
+    if [[ -d "$HOME/Rosetta_Analysis/.git" ]]; then
+        if [[ -L "$HOME/rosetta_analysis" ]]; then
+            :  # already a symlink — fine
+        elif [[ -d "$HOME/rosetta_analysis" ]]; then
+            log "  ⚠ ~/rosetta_analysis is a stale real dir shadowing the synced repo — repairing to symlink"
+            rm -rf "$HOME/rosetta_analysis"
+            ln -s "$HOME/Rosetta_Analysis" "$HOME/rosetta_analysis"
+        elif [[ ! -e "$HOME/rosetta_analysis" ]]; then
+            ln -s "$HOME/Rosetta_Analysis" "$HOME/rosetta_analysis"
+            log "  created symlink rosetta_analysis → Rosetta_Analysis"
+        fi
     fi
 
     # Sync rosetta_analysis venv and put it on PATH so job `python` calls use it
