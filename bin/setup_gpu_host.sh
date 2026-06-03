@@ -8,27 +8,40 @@
 #   1. Installs NVIDIA driver if needed (detects recommended via ubuntu-drivers)
 #   2. Creates ~/venv (Python 3.12) — Ubuntu 24.04 enforces PEP 668
 #   3. Installs PyTorch cu128, core ML stack, huggingface_hub, hf_transfer
-#   4. Clones rosetta_tools + rosetta_analysis (SSH agent forwarding required)
-#   5. Installs hopper from source (github.com/apathy-ca/hopper)
-#   6. Configures hopper instance + generates DID key
-#   7. Writes host alias and rosetta_queue dir
-#   8. Prints approval steps for the dev machine
+#   4. Installs the reusable staging deploy key so the daemon pulls private
+#      staging UNATTENDED (no SSH agent forwarding) — keys "stick" across rebuilds
+#   5. Caches the HF token to ~/.cache/huggingface/token (gated models)
+#   6. Clones rosetta_tools (public) + rosetta_analysis (private STAGING)
+#   7. Installs hopper from source (github.com/apathy-ca/hopper)
+#   8. Configures hopper instance + generates DID key
+#   9. Writes host alias and rosetta_queue dir
+#  10. Prints approval steps for the dev machine
 #
 # Usage:
-#   # From the dev machine, copy and run (SSH agent forwarding required for
-#   # private repos — ssh -A root@<host> or add ForwardAgent yes to ~/.ssh/config):
+#   # Easiest: drive it from the dev machine with the wrapper, which scp's the
+#   # deploy key + this script and passes the HF token automatically:
+#   bash ~/Source/Rosetta_Program/rosetta_tools/bin/provision_gpu_host.sh <ssh-host> --alias <name>
+#
+#   # Or run directly on the host (after scp'ing this script + the staging key):
+#   scp ~/.ssh/rosetta_staging_deploy root@<host>:~/.ssh/id_ed25519_staging
 #   scp ~/Source/Rosetta_Program/rosetta_tools/bin/setup_gpu_host.sh root@<host>:~
-#   ssh -A root@<host> "bash ~/setup_gpu_host.sh --alias <name>"
+#   ssh root@<host> "bash ~/setup_gpu_host.sh --alias <name> --hf-token hf_xxx \
+#                    --staging-key ~/.ssh/id_ed25519_staging"
 #
 # Options:
 #   --alias NAME           Short host alias shown in gpu_queue.sh (required unless
 #                          host_alias already exists in ~/rosetta_queue/)
+#   --hf-token TOKEN       Personal james-ra-henry HF token (NOT the TELUS token).
+#                          Cached to ~/.cache/huggingface/token for the daemon.
+#   --staging-key PATH     Private deploy key for private staging pulls. Installed
+#                          to ~/.ssh/id_ed25519_staging. Defaults to that path if a
+#                          key was already scp'd there.
 #   --upstream-server URL  Hopper server (default: https://hopper.henrynet.ca)
 #   --skip-driver          Skip NVIDIA driver detection/install (already installed)
 #   --skip-torch           Skip PyTorch install (already in venv)
 #   --skip-repos           Skip rosetta_tools/rosetta_analysis clone steps
 #
-# Updated: 2026-05-27 21:30 UTC
+# Updated: 2026-06-03 04:10 UTC
 
 set -euo pipefail
 
@@ -37,10 +50,15 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 UPSTREAM_SERVER="https://hopper.henrynet.ca"
 ROSETTA_TOOLS_URL="https://github.com/jamesrahenry/rosetta_tools.git"
-ROSETTA_ANALYSIS_URL="git@github.com:jamesrahenry/Rosetta_Analysis.git"
+# Private STAGING (not public main): the daemon pulls staging via the deploy key
+# installed below. Public main is the released baseline; net-new code lands here.
+ROSETTA_ANALYSIS_URL="git@github.com:jamesrahenry/Rosetta_Analysis-staging.git"
 HOPPER_SRC_URL="https://github.com/apathy-ca/hopper.git"
 QUEUE_DIR="${HOME}/rosetta_queue"
+STAGING_KEY_DST="${HOME}/.ssh/id_ed25519_staging"
 HOST_ALIAS=""
+HF_TOKEN=""
+STAGING_KEY=""
 SKIP_DRIVER=0
 SKIP_TORCH=0
 SKIP_REPOS=0
@@ -48,12 +66,15 @@ SKIP_REPOS=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --alias)           HOST_ALIAS="$2"; shift 2 ;;
+        --hf-token)        HF_TOKEN="$2"; shift 2 ;;
+        --staging-key)     STAGING_KEY="$2"; shift 2 ;;
         --upstream-server) UPSTREAM_SERVER="$2"; shift 2 ;;
         --skip-driver)     SKIP_DRIVER=1; shift ;;
         --skip-torch)      SKIP_TORCH=1; shift ;;
         --skip-repos)      SKIP_REPOS=1; shift ;;
         -h|--help)
-            echo "Usage: setup_gpu_host.sh [--alias NAME] [--upstream-server URL]"
+            echo "Usage: setup_gpu_host.sh [--alias NAME] [--hf-token TOKEN]"
+            echo "       [--staging-key PATH] [--upstream-server URL]"
             echo "       [--skip-driver] [--skip-torch] [--skip-repos]"
             exit 0 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
@@ -129,7 +150,57 @@ if [[ $SKIP_TORCH -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Repos
+# 4. Staging deploy key — makes UNATTENDED private pulls "stick"
+#    Without this the daemon (running in tmux, no SSH agent) cannot pull the
+#    private Rosetta_Analysis-staging repo. The key is the SAME reusable
+#    read-only deploy key on every host, so rebuilds never touch GitHub.
+# ---------------------------------------------------------------------------
+mkdir -p "${HOME}/.ssh"; chmod 700 "${HOME}/.ssh"
+# If --staging-key points at a separate path, install it to the canonical dst.
+if [[ -n "$STAGING_KEY" && "$STAGING_KEY" != "$STAGING_KEY_DST" ]]; then
+    cp "$STAGING_KEY" "$STAGING_KEY_DST"
+fi
+if [[ -f "$STAGING_KEY_DST" ]]; then
+    chmod 600 "$STAGING_KEY_DST"
+    # github.com over SSH → use ONLY this key (IdentitiesOnly), and ignore any
+    # forwarded agent (IdentityAgent none) so a stray agent key can't shadow it.
+    if ! grep -q 'id_ed25519_staging' "${HOME}/.ssh/config" 2>/dev/null; then
+        cat >> "${HOME}/.ssh/config" <<SSHCFG
+
+Host github.com
+  IdentityFile ~/.ssh/id_ed25519_staging
+  IdentitiesOnly yes
+  IdentityAgent none
+SSHCFG
+    fi
+    ssh-keyscan -t ed25519 github.com >> "${HOME}/.ssh/known_hosts" 2>/dev/null || true
+    sort -u "${HOME}/.ssh/known_hosts" -o "${HOME}/.ssh/known_hosts" 2>/dev/null || true
+    log "Staging deploy key installed → unattended staging pulls enabled"
+else
+    warn "No staging key at $STAGING_KEY_DST — private staging pulls will FAIL."
+    warn "  scp ~/.ssh/rosetta_staging_deploy root@<host>:$STAGING_KEY_DST  (or pass --staging-key)"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Hugging Face token — REQUIRED for gated models (gemma/llama).
+#    Must live at ~/.cache/huggingface/token; env/.bashrc/tmux don't reach the
+#    daemon, so a missing token => gated downloads fail SILENTLY ("completed"
+#    with no output). Use the personal james-ra-henry token, NOT the TELUS one.
+# ---------------------------------------------------------------------------
+if [[ -n "$HF_TOKEN" ]]; then
+    mkdir -p "${HOME}/.cache/huggingface"
+    printf '%s' "$HF_TOKEN" > "${HOME}/.cache/huggingface/token"
+    chmod 600 "${HOME}/.cache/huggingface/token"
+    log "HF token cached → gated model downloads enabled"
+elif [[ -f "${HOME}/.cache/huggingface/token" ]]; then
+    log "HF token already present at ~/.cache/huggingface/token"
+else
+    warn "No HF token — gated models (gemma/llama) will fail silently."
+    warn "  re-run with --hf-token hf_xxx  (personal james-ra-henry token)"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Repos
 # ---------------------------------------------------------------------------
 if [[ $SKIP_REPOS -eq 0 ]]; then
     # rosetta_tools (public HTTPS)
@@ -144,21 +215,22 @@ if [[ $SKIP_REPOS -eq 0 ]]; then
     pip install --quiet -e "${HOME}/rosetta_tools" \
         || warn "rosetta_tools pip install failed"
 
-    # rosetta_analysis (private SSH — requires agent forwarding)
-    if [[ ! -d "${HOME}/rosetta_analysis/.git" ]]; then
-        log "Cloning rosetta_analysis (SSH agent required) ..."
-        GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" \
-            git clone --quiet "$ROSETTA_ANALYSIS_URL" "${HOME}/rosetta_analysis" \
-            || warn "rosetta_analysis clone failed — add SSH key or run manually"
+    # rosetta_analysis (private STAGING via deploy key installed above)
+    if [[ ! -d "${HOME}/rosetta_analysis/.git" && ! -d "${HOME}/Rosetta_Analysis/.git" ]]; then
+        log "Cloning rosetta_analysis (private staging) ..."
+        git clone --quiet "$ROSETTA_ANALYSIS_URL" "${HOME}/Rosetta_Analysis" \
+            || warn "rosetta_analysis clone failed — check staging deploy key"
     else
-        log "rosetta_analysis present — pulling ..."
-        git -C "${HOME}/rosetta_analysis" pull --ff-only --quiet 2>/dev/null \
+        ra_dir="${HOME}/Rosetta_Analysis"; [[ -d "${HOME}/rosetta_analysis/.git" ]] && ra_dir="${HOME}/rosetta_analysis"
+        log "rosetta_analysis present — repointing origin to staging + pulling ..."
+        git -C "$ra_dir" remote set-url origin "$ROSETTA_ANALYSIS_URL" 2>/dev/null || true
+        git -C "$ra_dir" pull --ff-only --quiet 2>/dev/null \
             || warn "rosetta_analysis pull skipped"
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Hopper from source
+# 7. Hopper from source
 # ---------------------------------------------------------------------------
 if ! command -v hopper &>/dev/null; then
     log "Cloning hopper from source (github.com/apathy-ca/hopper) ..."
@@ -171,7 +243,7 @@ fi
 log "Hopper: $(hopper --version 2>/dev/null || echo 'unknown')"
 
 # ---------------------------------------------------------------------------
-# 6. Hopper instance config + DID key
+# 8. Hopper instance config + DID key
 # ---------------------------------------------------------------------------
 mkdir -p "$HOPPER_DIR"
 
@@ -207,7 +279,7 @@ DID=$(hopper upstream whoami 2>/dev/null || echo "<could not read DID>")
 log "This host's DID: $DID"
 
 # ---------------------------------------------------------------------------
-# 7. Host alias + rosetta_queue dir
+# 9. Host alias + rosetta_queue dir
 # ---------------------------------------------------------------------------
 mkdir -p "$QUEUE_DIR"
 
@@ -224,36 +296,31 @@ echo "$HOST_ALIAS" > "${QUEUE_DIR}/host_alias"
 log "Host alias: '$HOST_ALIAS'"
 
 # ---------------------------------------------------------------------------
-# 8. Data dirs
+# 10. Data dirs
 # ---------------------------------------------------------------------------
 mkdir -p "${HOME}/rosetta_data/"{models,results,paper_n250}
 mkdir -p "${HOME}/gpu_runs"
 
 # ---------------------------------------------------------------------------
-# 9. Print next steps
+# 11. Print next steps
 # ---------------------------------------------------------------------------
 echo ""
 echo "======================================================================"
-echo "  NEXT STEPS"
+echo "  AUTOMATED: driver, venv, torch, staging deploy key, HF token,"
+echo "             repos (analysis on STAGING), hopper, DID, alias, data dirs"
 echo "======================================================================"
+echo "  REMAINING (one interactive handshake + start daemon):"
 echo ""
-echo "  1. DEV machine — create invite and approve:"
-echo "       cd ~/Source/Rosetta_Program"
-echo "       hopper upstream invite create -n Rosetta_Program"
+echo "  1. Hopper enrol — create invite on DEV, redeem here:"
+echo "       (dev)  hopper upstream invite create -n Rosetta_Program"
+echo "       (here) hopper upstream redeem --server ${UPSTREAM_SERVER} <TOKEN> && hopper sync"
 echo ""
-echo "  2. THIS host — redeem token:"
-echo "       hopper upstream redeem --server ${UPSTREAM_SERVER} <TOKEN>"
-echo "       hopper sync"
+echo "  2. Start daemon in tmux (self-activates venv):"
+echo "       tmux new-session -d -s gpu 'bash ~/rosetta_tools/bin/gpu_daemon.sh'"
 echo ""
-echo "  3. DEV machine — add to sync config:"
+echo "  NOTE: the provision_gpu_host.sh wrapper registers this host in the dev"
+echo "  machine's sync_hosts.conf + ~/.ssh/config automatically. If you ran this"
+echo "  script directly, add the results sync line yourself:"
 echo "       echo '${HOST_ALIAS}  root@<HOST_IP>:~/rosetta_data/' \\"
 echo "           >> ~/Source/Rosetta_Program/rosetta_queue/sync_hosts.conf"
-echo ""
-echo "  4. Verify task queue:"
-echo "       hopper task list --tag gpu-job --compact"
-echo ""
-echo "  5. Start daemon in tmux:"
-echo "       tmux new-session -d -s gpu 'bash ~/rosetta_tools/bin/gpu_daemon.sh'"
-echo "       tmux attach -t gpu"
-echo ""
 echo "======================================================================"
