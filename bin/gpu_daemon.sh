@@ -120,9 +120,11 @@ ensure_data_dirs() {
 sync_repos() {
     ensure_data_dirs
     # repo_path:clone_url pairs; rosetta_analysis is a symlink → Rosetta_Analysis
+    # rosetta_tools + Rosetta_Analysis pull from PRIVATE staging remotes (SSH, via
+    # ~/.ssh/id_ed25519_staging). Rosetta_Concept_Pairs has no staging repo → public.
     declare -A REPO_URLS=(
-        ["$HOME/rosetta_tools"]="https://github.com/jamesrahenry/rosetta_tools.git"
-        ["$HOME/Rosetta_Analysis"]="https://github.com/jamesrahenry/Rosetta_Analysis.git"
+        ["$HOME/rosetta_tools"]="git@github.com:jamesrahenry/rosetta_tools-staging.git"
+        ["$HOME/Rosetta_Analysis"]="git@github.com:jamesrahenry/Rosetta_Analysis-staging.git"
         ["$HOME/Rosetta_Concept_Pairs"]="https://github.com/jamesrahenry/Rosetta_Concept_Pairs.git"
         ["$HOME/Concept_Integrity_Auditor"]="git@github.com:VectorInstitute/Concept_Integrity_Auditor.git"
     )
