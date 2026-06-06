@@ -8,7 +8,7 @@
 hopper sync 2>/dev/null || true
 
 printf "%-10s %-12s %-12s %-10s %s\n" "ID" "STATUS" "HOST" "NEEDS" "TITLE"
-hopper --json task list --tag gpu-job 2>/dev/null \
+hopper --json task list --tag gpu-job --limit 1000 2>/dev/null \
     | jq -r '
         sort_by(.created_at)
         | .[]

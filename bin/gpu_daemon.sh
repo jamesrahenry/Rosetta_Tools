@@ -233,7 +233,7 @@ task_status() {
 
 resolve_blocked() {
     local blocked_ids
-    blocked_ids=$(hopper task list --tag gpu-job --status blocked --ids-only 2>/dev/null || true)
+    blocked_ids=$(hopper task list --tag gpu-job --status blocked --ids-only --limit 1000 2>/dev/null || true)
     [[ -z "$blocked_ids" ]] && return
 
     while IFS= read -r tid; do
@@ -445,7 +445,7 @@ run_job() {
 
 reclaim_interrupted() {
     local ids
-    ids=$(hopper task list --tag gpu-job --status in_progress --ids-only 2>/dev/null || true)
+    ids=$(hopper task list --tag gpu-job --status in_progress --ids-only --limit 1000 2>/dev/null || true)
     [[ -z "$ids" ]] && return
 
     while IFS= read -r tid; do
@@ -480,7 +480,7 @@ while true; do
     {
         sync_hopper
 
-        task_id=$(hopper --json task list --tag gpu-job --status open 2>/dev/null \
+        task_id=$(hopper --json task list --tag gpu-job --status open --limit 1000 2>/dev/null \
             | jq -r --argjson myvram "$MY_VRAM" --arg host "$_host" '
                 # Keep only jobs this host can run:
                 #  - capability: vramN tag => needs >= N GB total VRAM (absent => 0)
