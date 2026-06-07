@@ -19,6 +19,7 @@ Typical usage
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 from collections import defaultdict
@@ -28,6 +29,8 @@ from typing import TYPE_CHECKING, Iterator, Literal
 
 if TYPE_CHECKING:
     import pandas as pd
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Canonical concept registry
@@ -203,12 +206,23 @@ def load_pairs(path: str | Path) -> list[ConceptPair]:
             by_pair[key][label] = record
 
     pairs = []
+    dropped_blank: list[str] = []
     for pair_id, records in sorted(by_pair.items()):
         if 1 not in records or 0 not in records:
             missing = 1 if 1 not in records else 0
             raise ValueError(f"Incomplete pair '{pair_id}': missing label {missing}")
         pos = records[1]
         neg = records[0]
+        # Skip pairs with blank/whitespace text on either side. These are data
+        # defects (e.g. a generator that emitted empty output for one polarity).
+        # A blank side makes an unbalanced contrastive pair and, downstream, the
+        # extractor's empty-text filter silently drops only that row — leaving
+        # pos/neg unpaired and misaligning cross-model activation comparisons.
+        # Dropping the whole pair here keeps the contrastive set complete and
+        # balanced; selection (load_concept_pairs) then samples only full pairs.
+        if not (pos.get("text") or "").strip() or not (neg.get("text") or "").strip():
+            dropped_blank.append(pair_id)
+            continue
         pairs.append(
             ConceptPair(
                 pair_id=pair_id,
@@ -233,6 +247,13 @@ def load_pairs(path: str | Path) -> list[ConceptPair]:
                     )
                 },
             )
+        )
+
+    if dropped_blank:
+        log.warning(
+            "load_pairs(%s): dropped %d incomplete pair(s) with blank text "
+            "(kept %d complete): %s",
+            path.name, len(dropped_blank), len(pairs), dropped_blank,
         )
 
     return pairs
