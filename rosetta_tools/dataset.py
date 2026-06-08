@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 import random
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -132,7 +133,14 @@ def load_concept_pairs(
     if len(all_pairs) <= n:
         return all_pairs
 
-    rng = random.Random(seed if seed is not None else hash((concept, split)) & 0xFFFFFFFF)
+    # Default seed must be STABLE across processes. Python's builtin hash() is
+    # salted per-interpreter (PYTHONHASHSEED), so it gave a different 250-pair
+    # subset on every script invocation — breaking reproducibility and making a
+    # model's caz/gem/ablation/random artifacts use mutually inconsistent pairs.
+    # Use a stable hash so every process samples the same subset per (concept, split).
+    if seed is None:
+        seed = int(hashlib.sha256(f"{concept}|{split}".encode()).hexdigest()[:8], 16)
+    rng = random.Random(seed)
     return rng.sample(all_pairs, n)
 
 
