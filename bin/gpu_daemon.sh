@@ -305,6 +305,12 @@ classify_failure() {
         echo "no_retry"; return
     fi
 
+    # CUDA hard faults (Xid-class) — deterministic code/driver bug, not transient.
+    # Auto-retrying these burned 12h crash-wipe-redo cycles on the gemma sweeps.
+    if grep -q "unspecified launch failure\|cudaErrorLaunchFailure\|illegal memory access\|AcceleratorError" "$log_file"; then
+        echo "no_retry"; return
+    fi
+
     # Hard code/logic errors — re-running won't change the outcome
     if grep -q "SyntaxError\|ImportError\|ModuleNotFoundError\|AttributeError\|TypeError\|NameError" "$log_file"; then
         echo "no_retry"; return
