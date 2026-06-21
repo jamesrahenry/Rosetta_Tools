@@ -60,7 +60,7 @@ fi
 [[ "${MY_GPUS:-0}" -ge 1 ]] 2>/dev/null || MY_GPUS=1
 [[ "${MY_VRAM:-0}" -ge 1 ]] 2>/dev/null || MY_VRAM=0
 
-POLL_INTERVAL=30      # seconds between polls when idle
+POLL_INTERVAL="${GPU_DAEMON_POLL:-300}"  # seconds between polls when idle (env-tuneable)
 LOG_DIR="${HOME}/gpu_runs"
 MIN_DISK_GIB=15
 MAX_RETRIES=2         # auto-retry failed jobs this many times before marking blocked
