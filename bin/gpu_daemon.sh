@@ -119,21 +119,22 @@ ensure_data_dirs() {
 
 sync_repos() {
     ensure_data_dirs
-    # repo_path:clone_url pairs; rosetta_analysis is a symlink → Rosetta_Analysis
-    declare -A REPO_URLS=(
-        ["$HOME/rosetta_tools"]="https://github.com/jamesrahenry/rosetta_tools.git"
-        ["$HOME/Rosetta_Analysis"]="https://github.com/jamesrahenry/Rosetta_Analysis.git"
-        ["$HOME/Rosetta_Concept_Pairs"]="https://github.com/jamesrahenry/Rosetta_Concept_Pairs.git"
-        ["$HOME/Concept_Integrity_Auditor"]="git@github.com:VectorInstitute/Concept_Integrity_Auditor.git"
-    )
+    # repo_path|clone_url pairs (pipe-delimited for bash 3.2 compat — no declare -A)
+    local _repos="
+$HOME/rosetta_tools|https://github.com/jamesrahenry/rosetta_tools.git
+$HOME/Rosetta_Analysis|https://github.com/jamesrahenry/Rosetta_Analysis.git
+$HOME/Rosetta_Concept_Pairs|https://github.com/jamesrahenry/Rosetta_Concept_Pairs.git
+$HOME/Concept_Integrity_Auditor|git@github.com:VectorInstitute/Concept_Integrity_Auditor.git
+"
 
-    for repo in "${!REPO_URLS[@]}"; do
-        local url="${REPO_URLS[$repo]}"
-        local name; name=$(basename "$repo")
+    local _line repo url name
+    while IFS='|' read -r repo url; do
+        [[ -z "$repo" ]] && continue
+        name=$(basename "$repo")
 
-        # Resolve symlink if path doesn't exist but a symlink target does
+        # Resolve symlink (portable — no readlink -f on macOS)
         if [[ ! -d "$repo" && -L "$repo" ]]; then
-            repo=$(readlink -f "$repo")
+            repo=$(cd "$(dirname "$repo")" && cd "$(readlink "$(basename "$repo")")" && pwd)
         fi
 
         # Clone if missing
@@ -156,7 +157,7 @@ sync_repos() {
         if [[ -f "$repo/pyproject.toml" && "$name" != "Concept_Integrity_Auditor" && "$name" != "Rosetta_Analysis" ]]; then
             pip install -q -e "$repo" 2>/dev/null && log "  reinstalled $name"
         fi
-    done
+    done <<< "$_repos"
 
     # Ensure ~/rosetta_analysis symlink exists
     if [[ ! -e "$HOME/rosetta_analysis" && -d "$HOME/Rosetta_Analysis" ]]; then
