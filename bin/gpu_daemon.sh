@@ -22,7 +22,7 @@ set -uo pipefail
 # that never sources ~/.bashrc, so hopper (installed in ~/venv) would be missing
 # and every hopper call would fail silently, leaving the daemon stuck on
 # "Queue empty" forever even with jobs waiting.
-if ! command -v hopper >/dev/null 2>&1 && [[ -f "$HOME/venv/bin/activate" ]]; then
+if [[ -f "$HOME/venv/bin/activate" ]]; then
     # shellcheck disable=SC1091
     source "$HOME/venv/bin/activate"
 fi
