@@ -87,7 +87,9 @@ log() { echo "$(date +%H:%M:%S) [daemon] $*"; }
 sync_hopper() { hopper sync 2>/dev/null || true; }
 
 free_gib() {
-    df -BG "$HOME" | awk 'NR==2 {gsub("G",""); print $4}'
+    # Linux: df -BG (GNU coreutils); macOS: df -g (BSD)
+    df -BG "$HOME" 2>/dev/null | awk 'NR==2 {gsub("G",""); print $4}' \
+        || df -g "$HOME" | awk 'NR==2 {print $4}'
 }
 
 purge_hf_cache() {
