@@ -375,7 +375,7 @@ run_job() {
     local hb_pid=$!
 
     set +e
-    bash -c "$cmd" >> "$log_file" 2>&1
+    HOPPER_TASK_ID="$task_id" bash -c "$cmd" >> "$log_file" 2>&1
     local exit_code=$?
     set -e
 
