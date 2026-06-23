@@ -7,41 +7,33 @@
 # What it does:
 #   1. Installs NVIDIA driver if needed (detects recommended via ubuntu-drivers)
 #   2. Creates ~/venv (Python 3.12) — Ubuntu 24.04 enforces PEP 668
+#   2b. Installs uv (REQUIRED — jobs run `uv run ...`)
 #   3. Installs PyTorch cu128, core ML stack, huggingface_hub, hf_transfer
-#   4. Installs the reusable staging deploy key so the daemon pulls private
-#      staging UNATTENDED (no SSH agent forwarding) — keys "stick" across rebuilds
-#   5. Caches the HF token to ~/.cache/huggingface/token (gated models)
-#   6. Clones rosetta_tools (public) + rosetta_analysis (private STAGING)
-#   7. Installs hopper from source (github.com/apathy-ca/hopper)
-#   8. Configures hopper instance + generates DID key
-#   9. Writes host alias and rosetta_queue dir
-#  10. Prints approval steps for the dev machine
+#   4. Caches the HF token to ~/.cache/huggingface/token (gated models)
+#   5. Clones rosetta_tools + rosetta_analysis from public origin
+#   6. Installs hopper from source (github.com/apathy-ca/hopper)
+#   7. Configures hopper instance + generates DID key
+#   8. Writes host alias and rosetta_queue dir
+#   9. Prints approval steps for the dev machine
 #
 # Usage:
-#   # Easiest: drive it from the dev machine with the wrapper, which scp's the
-#   # deploy key + this script and passes the HF token automatically:
+#   # Easiest: drive from the dev machine via the wrapper:
 #   bash ~/Source/Rosetta_Program/rosetta_tools/bin/provision_gpu_host.sh <ssh-host> --alias <name>
 #
-#   # Or run directly on the host (after scp'ing this script + the staging key):
-#   scp ~/.ssh/rosetta_staging_deploy root@<host>:~/.ssh/id_ed25519_staging
-#   scp ~/Source/Rosetta_Program/rosetta_tools/bin/setup_gpu_host.sh root@<host>:~
-#   ssh root@<host> "bash ~/setup_gpu_host.sh --alias <name> --hf-token hf_xxx \
-#                    --staging-key ~/.ssh/id_ed25519_staging"
+#   # Or run directly on the host:
+#   ssh root@<host> "bash ~/setup_gpu_host.sh --alias <name> --hf-token hf_xxx"
 #
 # Options:
 #   --alias NAME           Short host alias shown in gpu_queue.sh (required unless
 #                          host_alias already exists in ~/rosetta_queue/)
 #   --hf-token TOKEN       Personal james-ra-henry HF token (NOT the TELUS token).
 #                          Cached to ~/.cache/huggingface/token for the daemon.
-#   --staging-key PATH     Private deploy key for private staging pulls. Installed
-#                          to ~/.ssh/id_ed25519_staging. Defaults to that path if a
-#                          key was already scp'd there.
 #   --upstream-server URL  Hopper server (default: https://hopper.henrynet.ca)
 #   --skip-driver          Skip NVIDIA driver detection/install (already installed)
 #   --skip-torch           Skip PyTorch install (already in venv)
 #   --skip-repos           Skip rosetta_tools/rosetta_analysis clone steps
 #
-# Updated: 2026-06-03 04:10 UTC
+# Updated: 2026-06-22 UTC
 
 set -euo pipefail
 
@@ -50,15 +42,11 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 UPSTREAM_SERVER="https://hopper.henrynet.ca"
 ROSETTA_TOOLS_URL="https://github.com/jamesrahenry/rosetta_tools.git"
-# Private STAGING (not public main): the daemon pulls staging via the deploy key
-# installed below. Public main is the released baseline; net-new code lands here.
-ROSETTA_ANALYSIS_URL="git@github.com:jamesrahenry/Rosetta_Analysis-staging.git"
+ROSETTA_ANALYSIS_URL="https://github.com/jamesrahenry/Rosetta_Analysis.git"
 HOPPER_SRC_URL="https://github.com/apathy-ca/hopper.git"
 QUEUE_DIR="${HOME}/rosetta_queue"
-STAGING_KEY_DST="${HOME}/.ssh/id_ed25519_staging"
 HOST_ALIAS=""
 HF_TOKEN=""
-STAGING_KEY=""
 SKIP_DRIVER=0
 SKIP_TORCH=0
 SKIP_REPOS=0
@@ -67,14 +55,13 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --alias)           HOST_ALIAS="$2"; shift 2 ;;
         --hf-token)        HF_TOKEN="$2"; shift 2 ;;
-        --staging-key)     STAGING_KEY="$2"; shift 2 ;;
         --upstream-server) UPSTREAM_SERVER="$2"; shift 2 ;;
         --skip-driver)     SKIP_DRIVER=1; shift ;;
         --skip-torch)      SKIP_TORCH=1; shift ;;
         --skip-repos)      SKIP_REPOS=1; shift ;;
         -h|--help)
             echo "Usage: setup_gpu_host.sh [--alias NAME] [--hf-token TOKEN]"
-            echo "       [--staging-key PATH] [--upstream-server URL]"
+            echo "       [--upstream-server URL]"
             echo "       [--skip-driver] [--skip-torch] [--skip-repos]"
             exit 0 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
@@ -132,6 +119,24 @@ grep -q 'source ~/venv/bin/activate' ~/.bashrc 2>/dev/null \
 log "venv: $(python --version)"
 
 # ---------------------------------------------------------------------------
+# 2b. uv — REQUIRED: Rosetta_Analysis jobs run `uv run ...`. Without uv on the
+#     daemon's PATH, every claimed job dies with `uv: command not found` and is
+#     marked blocked — silently eating the whole open queue.
+# ---------------------------------------------------------------------------
+if ! command -v uv >/dev/null 2>&1 || [[ ! -x "${HOME}/venv/bin/uv" ]]; then
+    log "Installing uv into venv ..."
+    pip install --quiet uv || warn "uv pip install failed — jobs that call 'uv run' will fail"
+fi
+if [[ -x "${HOME}/venv/bin/uv" ]]; then
+    ln -sf "${HOME}/venv/bin/uv"  /usr/local/bin/uv  2>/dev/null \
+        || sudo ln -sf "${HOME}/venv/bin/uv"  /usr/local/bin/uv  2>/dev/null \
+        || warn "could not symlink uv to /usr/local/bin (venv uv still on daemon PATH)"
+    [[ -x "${HOME}/venv/bin/uvx" ]] && { ln -sf "${HOME}/venv/bin/uvx" /usr/local/bin/uvx 2>/dev/null \
+        || sudo ln -sf "${HOME}/venv/bin/uvx" /usr/local/bin/uvx 2>/dev/null || true; }
+fi
+log "uv: $(uv --version 2>/dev/null || echo 'NOT INSTALLED')"
+
+# ---------------------------------------------------------------------------
 # 3. PyTorch + core ML stack
 # ---------------------------------------------------------------------------
 if [[ $SKIP_TORCH -eq 0 ]]; then
@@ -150,42 +155,10 @@ if [[ $SKIP_TORCH -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Staging deploy key — makes UNATTENDED private pulls "stick"
-#    Without this the daemon (running in tmux, no SSH agent) cannot pull the
-#    private Rosetta_Analysis-staging repo. The key is the SAME reusable
-#    read-only deploy key on every host, so rebuilds never touch GitHub.
-# ---------------------------------------------------------------------------
-mkdir -p "${HOME}/.ssh"; chmod 700 "${HOME}/.ssh"
-# If --staging-key points at a separate path, install it to the canonical dst.
-if [[ -n "$STAGING_KEY" && "$STAGING_KEY" != "$STAGING_KEY_DST" ]]; then
-    cp "$STAGING_KEY" "$STAGING_KEY_DST"
-fi
-if [[ -f "$STAGING_KEY_DST" ]]; then
-    chmod 600 "$STAGING_KEY_DST"
-    # github.com over SSH → use ONLY this key (IdentitiesOnly), and ignore any
-    # forwarded agent (IdentityAgent none) so a stray agent key can't shadow it.
-    if ! grep -q 'id_ed25519_staging' "${HOME}/.ssh/config" 2>/dev/null; then
-        cat >> "${HOME}/.ssh/config" <<SSHCFG
-
-Host github.com
-  IdentityFile ~/.ssh/id_ed25519_staging
-  IdentitiesOnly yes
-  IdentityAgent none
-SSHCFG
-    fi
-    ssh-keyscan -t ed25519 github.com >> "${HOME}/.ssh/known_hosts" 2>/dev/null || true
-    sort -u "${HOME}/.ssh/known_hosts" -o "${HOME}/.ssh/known_hosts" 2>/dev/null || true
-    log "Staging deploy key installed → unattended staging pulls enabled"
-else
-    warn "No staging key at $STAGING_KEY_DST — private staging pulls will FAIL."
-    warn "  scp ~/.ssh/rosetta_staging_deploy root@<host>:$STAGING_KEY_DST  (or pass --staging-key)"
-fi
-
-# ---------------------------------------------------------------------------
-# 5. Hugging Face token — REQUIRED for gated models (gemma/llama).
+# 4. Hugging Face token — REQUIRED for gated models (gemma/llama).
 #    Must live at ~/.cache/huggingface/token; env/.bashrc/tmux don't reach the
-#    daemon, so a missing token => gated downloads fail SILENTLY ("completed"
-#    with no output). Use the personal james-ra-henry token, NOT the TELUS one.
+#    daemon, so a missing token => gated downloads fail SILENTLY.
+#    Use the personal james-ra-henry token, NOT the TELUS one.
 # ---------------------------------------------------------------------------
 if [[ -n "$HF_TOKEN" ]]; then
     mkdir -p "${HOME}/.cache/huggingface"
@@ -200,29 +173,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Repos
+# 5. Repos — public origin, HTTPS (no deploy key needed)
 # ---------------------------------------------------------------------------
 if [[ $SKIP_REPOS -eq 0 ]]; then
-    # rosetta_tools (public HTTPS)
+    # rosetta_tools
     if [[ ! -d "${HOME}/rosetta_tools/.git" ]]; then
         log "Cloning rosetta_tools ..."
-        git clone --quiet "$ROSETTA_TOOLS_URL" "${HOME}/rosetta_tools"
+        git clone --quiet "$ROSETTA_TOOLS_URL" "${HOME}/rosetta_tools" \
+            || warn "rosetta_tools clone failed"
     else
         log "rosetta_tools present — pulling ..."
+        git -C "${HOME}/rosetta_tools" remote set-url origin "$ROSETTA_TOOLS_URL" 2>/dev/null || true
         git -C "${HOME}/rosetta_tools" pull --ff-only --quiet 2>/dev/null \
-            || warn "rosetta_tools pull skipped (diverged)"
+            || warn "rosetta_tools pull skipped (diverged or unreachable)"
     fi
     pip install --quiet -e "${HOME}/rosetta_tools" \
         || warn "rosetta_tools pip install failed"
 
-    # rosetta_analysis (private STAGING via deploy key installed above)
-    if [[ ! -d "${HOME}/rosetta_analysis/.git" && ! -d "${HOME}/Rosetta_Analysis/.git" ]]; then
-        log "Cloning rosetta_analysis (private staging) ..."
+    # rosetta_analysis
+    ra_dir=""
+    [[ -d "${HOME}/Rosetta_Analysis/.git" ]] && ra_dir="${HOME}/Rosetta_Analysis"
+    [[ -d "${HOME}/rosetta_analysis/.git" ]] && ra_dir="${HOME}/rosetta_analysis"
+    if [[ -z "$ra_dir" ]]; then
+        log "Cloning rosetta_analysis ..."
         git clone --quiet "$ROSETTA_ANALYSIS_URL" "${HOME}/Rosetta_Analysis" \
-            || warn "rosetta_analysis clone failed — check staging deploy key"
+            || warn "rosetta_analysis clone failed"
     else
-        ra_dir="${HOME}/Rosetta_Analysis"; [[ -d "${HOME}/rosetta_analysis/.git" ]] && ra_dir="${HOME}/rosetta_analysis"
-        log "rosetta_analysis present — repointing origin to staging + pulling ..."
+        log "rosetta_analysis present — pulling ..."
         git -C "$ra_dir" remote set-url origin "$ROSETTA_ANALYSIS_URL" 2>/dev/null || true
         git -C "$ra_dir" pull --ff-only --quiet 2>/dev/null \
             || warn "rosetta_analysis pull skipped"
@@ -230,7 +207,7 @@ if [[ $SKIP_REPOS -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Hopper from source
+# 6. Hopper from source
 # ---------------------------------------------------------------------------
 if ! command -v hopper &>/dev/null; then
     log "Cloning hopper from source (github.com/apathy-ca/hopper) ..."
@@ -243,7 +220,7 @@ fi
 log "Hopper: $(hopper --version 2>/dev/null || echo 'unknown')"
 
 # ---------------------------------------------------------------------------
-# 8. Hopper instance config + DID key
+# 7. Hopper instance config + DID key
 # ---------------------------------------------------------------------------
 mkdir -p "$HOPPER_DIR"
 
@@ -279,7 +256,7 @@ DID=$(hopper upstream whoami 2>/dev/null || echo "<could not read DID>")
 log "This host's DID: $DID"
 
 # ---------------------------------------------------------------------------
-# 9. Host alias + rosetta_queue dir
+# 8. Host alias + rosetta_queue dir
 # ---------------------------------------------------------------------------
 mkdir -p "$QUEUE_DIR"
 
@@ -296,18 +273,17 @@ echo "$HOST_ALIAS" > "${QUEUE_DIR}/host_alias"
 log "Host alias: '$HOST_ALIAS'"
 
 # ---------------------------------------------------------------------------
-# 10. Data dirs
+# 9. Data dirs
 # ---------------------------------------------------------------------------
 mkdir -p "${HOME}/rosetta_data/"{models,results,paper_n250}
 mkdir -p "${HOME}/gpu_runs"
 
 # ---------------------------------------------------------------------------
-# 11. Print next steps
+# 10. Print next steps
 # ---------------------------------------------------------------------------
 echo ""
 echo "======================================================================"
-echo "  AUTOMATED: driver, venv, torch, staging deploy key, HF token,"
-echo "             repos (analysis on STAGING), hopper, DID, alias, data dirs"
+echo "  AUTOMATED: driver, venv, torch, HF token, repos, hopper, DID, alias"
 echo "======================================================================"
 echo "  REMAINING (one interactive handshake + start daemon):"
 echo ""
