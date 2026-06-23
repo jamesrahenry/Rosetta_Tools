@@ -22,7 +22,7 @@ set -uo pipefail
 # that never sources ~/.bashrc, so hopper (installed in ~/venv) would be missing
 # and every hopper call would fail silently, leaving the daemon stuck on
 # "Queue empty" forever even with jobs waiting.
-if ! command -v hopper >/dev/null 2>&1 && [[ -f "$HOME/venv/bin/activate" ]]; then
+if [[ -f "$HOME/venv/bin/activate" ]]; then
     # shellcheck disable=SC1091
     source "$HOME/venv/bin/activate"
 fi
@@ -60,7 +60,7 @@ fi
 [[ "${MY_GPUS:-0}" -ge 1 ]] 2>/dev/null || MY_GPUS=1
 [[ "${MY_VRAM:-0}" -ge 1 ]] 2>/dev/null || MY_VRAM=0
 
-POLL_INTERVAL=30      # seconds between polls when idle
+POLL_INTERVAL="${GPU_DAEMON_POLL:-300}"  # seconds between polls when idle (env-tuneable)
 LOG_DIR="${HOME}/gpu_runs"
 MIN_DISK_GIB=15
 MAX_RETRIES=2         # auto-retry failed jobs this many times before marking blocked
@@ -87,7 +87,9 @@ log() { echo "$(date +%H:%M:%S) [daemon] $*"; }
 sync_hopper() { hopper sync 2>/dev/null || true; }
 
 free_gib() {
-    df -BG "$HOME" | awk 'NR==2 {gsub("G",""); print $4}'
+    # Linux: df -BG (GNU coreutils); macOS: df -g (BSD)
+    df -BG "$HOME" 2>/dev/null | awk 'NR==2 {gsub("G",""); print $4}' \
+        || df -g "$HOME" | awk 'NR==2 {print $4}'
 }
 
 purge_hf_cache() {
@@ -119,23 +121,23 @@ ensure_data_dirs() {
 
 sync_repos() {
     ensure_data_dirs
-    # repo_path:clone_url pairs; rosetta_analysis is a symlink → Rosetta_Analysis
-    # rosetta_tools + Rosetta_Analysis pull from PRIVATE staging remotes (SSH, via
-    # ~/.ssh/id_ed25519_staging). Rosetta_Concept_Pairs has no staging repo → public.
-    declare -A REPO_URLS=(
-        ["$HOME/rosetta_tools"]="git@github.com:jamesrahenry/rosetta_tools-staging.git"
-        ["$HOME/Rosetta_Analysis"]="git@github.com:jamesrahenry/Rosetta_Analysis-staging.git"
-        ["$HOME/Rosetta_Concept_Pairs"]="https://github.com/jamesrahenry/Rosetta_Concept_Pairs.git"
-        ["$HOME/Concept_Integrity_Auditor"]="git@github.com:VectorInstitute/Concept_Integrity_Auditor.git"
-    )
+    # repo_path|clone_url pairs (pipe-delimited for bash 3.2 compat — no declare -A)
+    local _repos="
+$HOME/rosetta_tools|https://github.com/jamesrahenry/rosetta_tools.git
+$HOME/Rosetta_Analysis|https://github.com/jamesrahenry/Rosetta_Analysis.git
+$HOME/Rosetta_Concept_Pairs|https://github.com/jamesrahenry/Rosetta_Concept_Pairs.git
+$HOME/Concept_Integrity_Auditor|git@github.com:VectorInstitute/Concept_Integrity_Auditor.git
+$HOME/gpu_jobs|git@github.com:eigan-ai/gpu_jobs.git
+"
 
-    for repo in "${!REPO_URLS[@]}"; do
-        local url="${REPO_URLS[$repo]}"
-        local name; name=$(basename "$repo")
+    local _line repo url name
+    while IFS='|' read -r repo url; do
+        [[ -z "$repo" ]] && continue
+        name=$(basename "$repo")
 
-        # Resolve symlink if path doesn't exist but a symlink target does
+        # Resolve symlink (portable — no readlink -f on macOS)
         if [[ ! -d "$repo" && -L "$repo" ]]; then
-            repo=$(readlink -f "$repo")
+            repo=$(cd "$(dirname "$repo")" && cd "$(readlink "$(basename "$repo")")" && pwd)
         fi
 
         # Clone if missing
@@ -158,7 +160,7 @@ sync_repos() {
         if [[ -f "$repo/pyproject.toml" && "$name" != "Concept_Integrity_Auditor" && "$name" != "Rosetta_Analysis" ]]; then
             pip install -q -e "$repo" 2>/dev/null && log "  reinstalled $name"
         fi
-    done
+    done <<< "$_repos"
 
     # Ensure ~/rosetta_analysis is a SYMLINK to the daemon-synced ~/Rosetta_Analysis.
     # Jobs `cd ~/rosetta_analysis`; the daemon only ever pulls ~/Rosetta_Analysis. If
@@ -391,7 +393,7 @@ run_job() {
     local hb_pid=$!
 
     set +e
-    bash -c "$cmd" >> "$log_file" 2>&1
+    HOPPER_TASK_ID="$task_id" bash -c "$cmd" >> "$log_file" 2>&1
     local exit_code=$?
     set -e
 

@@ -125,14 +125,15 @@ def get_device(prefer: str = "auto") -> str:
     Parameters
     ----------
     prefer:
-        ``"auto"``  — CUDA if available, otherwise CPU (default).
+        ``"auto"``  — CUDA if available, then MPS (Apple Silicon), otherwise CPU.
         ``"cuda"``  — require CUDA; raises RuntimeError if unavailable.
+        ``"mps"``   — require MPS; raises RuntimeError if unavailable.
         ``"cpu"``   — always CPU.
 
     Returns
     -------
     str
-        ``"cuda"`` or ``"cpu"``.
+        ``"cuda"``, ``"mps"``, or ``"cpu"``.
     """
     if prefer == "cpu":
         return "cpu"
@@ -140,7 +141,16 @@ def get_device(prefer: str = "auto") -> str:
         if not torch.cuda.is_available():
             raise RuntimeError("Device 'cuda' was requested but CUDA is not available.")
         return "cuda"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if prefer == "mps":
+        if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+            raise RuntimeError("Device 'mps' was requested but MPS is not available.")
+        return "mps"
+    # auto: CUDA → MPS → CPU
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -196,13 +206,17 @@ def get_dtype(
         GPT-2-XL credibility results was caused by fp16 on a 4 GB card).
         For PoC runs on a laptop, correctness matters more than throughput.
 
+    MPS (Apple Silicon):
+        float32.  MPS bf16 support is incomplete in PyTorch — some ops
+        fall back to CPU silently, others error.  float32 is reliable.
+
     CPU:
         float32 always.  bfloat16 CPU support is inconsistent.
 
     Parameters
     ----------
     device:
-        ``"cuda"`` or ``"cpu"``.
+        ``"cuda"``, ``"mps"``, or ``"cpu"``.
     prefer:
         ``"auto"``     — environment-aware selection (default).
         ``"bfloat16"`` — bfloat16 if GPU supports it, else float32.
@@ -212,7 +226,7 @@ def get_dtype(
     -------
     torch.dtype
     """
-    if device == "cpu":
+    if device in ("cpu", "mps"):
         return torch.float32
 
     if prefer == "float32":
@@ -297,7 +311,7 @@ def safe_batch_size(requested: int, device: str = "cuda", reserve_gib: float = 2
 
     Returns the (possibly reduced) batch size.
     """
-    if device != "cuda" or not torch.cuda.is_available():
+    if device not in ("cuda",) or not torch.cuda.is_available():
         return requested
 
     stats = vram_stats()
@@ -349,6 +363,9 @@ def log_device_info(device: str, dtype: torch.dtype) -> None:
                 f"VRAM free: {stats['free_gib']:.1f} / {stats['total_gib']:.1f} GiB"
             )
             return
+    if device == "mps":
+        print(f"Device: {device} (Apple Silicon)  |  dtype: {dtype_name}")
+        return
     print(f"Device: {device}  |  dtype: {dtype_name}")
 
 
@@ -376,8 +393,10 @@ def release_model(model, *, clear_cache: bool = True) -> None:
     # Synchronize before freeing so all pending GPU ops complete.
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        torch.mps.synchronize()
 
-    # For non-quantized models, move to CPU first so CUDA tensors are freed
+    # For non-quantized models, move to CPU first so CUDA/MPS tensors are freed
     # synchronously.  BitsAndBytes Int8Params don't support .cpu() — skip it
     # for quantized models to avoid silent failure leaving GPU memory pinned.
     is_quantized = getattr(model, "is_quantized", False) or getattr(
@@ -397,6 +416,10 @@ def release_model(model, *, clear_cache: bool = True) -> None:
         # Second gc pass — catches reference cycles broken by first pass
         gc.collect()
         torch.cuda.empty_cache()
+    elif clear_cache and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+        gc.collect()
+        torch.mps.empty_cache()
 
 
 def purge_hf_cache(model_id: str, min_free_gb: float = 15.0) -> None:
@@ -608,7 +631,13 @@ def load_model_with_retry(
                 raise
 
     # Phase 2: load from local cache — no network access.
-    effective_device_map = device_map if device_map is not None else device
+    #
+    # MPS (Apple Silicon) does not support device_map — load to CPU then .to("mps").
+    _is_mps = (device == "mps")
+    if _is_mps:
+        effective_device_map = None
+    else:
+        effective_device_map = device_map if device_map is not None else device
 
     # Multi-GPU device_map='auto' greedily fills GPU 0 with weights, leaving no
     # headroom for activations -> the global sweep's per-layer ablation forwards
@@ -624,6 +653,18 @@ def load_model_with_retry(
                 effective_device_map = "balanced"
         except Exception:
             pass
+
+    def _load_and_place(local_only: bool):
+        kwargs = {"torch_dtype": dtype}
+        if effective_device_map is not None:
+            kwargs["device_map"] = effective_device_map
+            kwargs["max_memory"] = max_memory
+        if local_only:
+            kwargs["local_files_only"] = True
+        m = model_cls.from_pretrained(model_id, **kwargs)
+        if _is_mps:
+            m = m.to("mps")
+        return m
 
     if quantization_config is not None:
         return model_cls.from_pretrained(
@@ -641,17 +682,9 @@ def load_model_with_retry(
             local_files_only=True,
         )
     try:
-        return model_cls.from_pretrained(
-            model_id, torch_dtype=dtype, device_map=effective_device_map,
-            max_memory=max_memory, local_files_only=True,
-        )
+        return _load_and_place(local_only=True)
     except (ValueError, ImportError, AttributeError, OSError):
-        # AttributeError: checkpoint_files=None when local cache is stale/incomplete
-        # OSError: local_files_only but file not found — fall back to network load
-        return model_cls.from_pretrained(
-            model_id, torch_dtype=dtype, device_map=effective_device_map,
-            max_memory=max_memory,
-        )
+        return _load_and_place(local_only=False)
 
 
 def load_causal_lm(
