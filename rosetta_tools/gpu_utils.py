@@ -537,6 +537,7 @@ def load_model_with_retry(
     device_map: str | None = None,
     load_in_8bit: bool = False,
     quantization_config=None,
+    max_memory: dict | None = None,
     max_retries: int = 15,
     retry_delay: float = 10.0,
 ):
@@ -643,9 +644,12 @@ def load_model_with_retry(
     # headroom for activations -> the global sweep's per-layer ablation forwards
     # OOM on 9-14B models. Use 'balanced' instead: it splits weights EVENLY across
     # GPUs (e.g. 14/14 GB for a 28 GB model), leaving ~(GPU - weights/N) free per
-    # GPU for activations. No max_memory ceiling — an artificial cap forced disk
-    # offload on the 28 GB Qwen-14B (real layers to disk -> sweep hangs).
-    max_memory = None
+    # GPU for activations. No max_memory ceiling BY DEFAULT — an artificial cap
+    # forced disk offload on the 28 GB Qwen-14B (real layers to disk -> sweep
+    # hangs). Callers that DO need a cap (single-GPU CPU offload of >VRAM
+    # models, where auto packs the card to ~100% and forwards OOM) pass
+    # max_memory explicitly with a generous "cpu" allocation so nothing ever
+    # spills to disk.
     if effective_device_map == "auto":
         try:
             import torch as _t
