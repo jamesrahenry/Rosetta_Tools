@@ -298,6 +298,184 @@ def compute_layer_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Extraction-time quality / stability report
+# ---------------------------------------------------------------------------
+
+# Default flag thresholds for concept_quality_report.  A flag means "worth a
+# human look before this concept×model enters an analysis", not "definitely
+# broken".  Tuned conservatively; override per-call if a concept legitimately
+# lives outside these bounds.
+QUALITY_THRESHOLDS: dict[str, float] = {
+    "split_half_dom_cos": 0.90,   # below ⇒ DOM direction is not reproducible
+    "peak_separation":    0.05,   # below ⇒ classes barely separable at peak
+    "class_balance":      0.50,   # min(n_pos,n_neg)/max below ⇒ imbalanced pools
+    "nonfinite_frac":     0.01,   # above ⇒ too many non-finite calibration rows
+    "dom_norm":           1e-6,   # below ⇒ degenerate (near-zero) direction
+}
+
+_MIN_SPLIT_SAMPLES = 4  # need ≥2 per half in each class to form two DOMs
+
+
+def _dom(pos: NDArray, neg: NDArray) -> NDArray:
+    """Raw (un-normalized) difference-of-means direction."""
+    return pos.mean(axis=0) - neg.mean(axis=0)
+
+
+def split_half_dom_reproducibility(
+    pos: NDArray,
+    neg: NDArray,
+    *,
+    seed: int = 0,
+    n_splits: int = 5,
+) -> dict:
+    """Reproducibility of the difference-of-means (DOM) direction across two
+    random halves of the calibration pairs, at a single layer.
+
+    For each of ``n_splits`` random partitions, the positive and negative pools
+    are each split in half; a DOM is computed from each half-corpus and the two
+    DOMs are compared by cosine.  A low mean cosine means the concept direction
+    is not stably estimable from this calibration — the signature of
+    sample-starvation (few coherent pairs relative to representational spread,
+    the Gemma-2 regime) or of *partial* label corruption that mixes the two
+    classes (the exfiltration label-inversion regime, where ~72% of labels were
+    swapped and the net direction went noise-dominated).
+
+    IMPORTANT — what this does NOT catch: a *clean, systematic* label inversion
+    (every pair flipped the same way) yields a stable-but-wrong DOM (high
+    split-half cosine).  That failure mode is invisible to any single-extraction
+    check and must be caught by the corpus-level cross-model consistency pass
+    (an inverted model anti-aligns with the rest of the roster), which cannot be
+    computed from one extraction in isolation.
+
+    Returns a dict with ``mean``, ``min``, ``n_splits``, and ``ok`` (False if
+    there were too few samples to split), all JSON-serializable.
+    """
+    pos = np.asarray(pos, dtype=np.float64)
+    neg = np.asarray(neg, dtype=np.float64)
+    pos = pos[np.isfinite(pos).all(axis=1)]
+    neg = neg[np.isfinite(neg).all(axis=1)]
+    if len(pos) < _MIN_SPLIT_SAMPLES or len(neg) < _MIN_SPLIT_SAMPLES:
+        return {"mean": None, "min": None, "n_splits": 0, "ok": False}
+
+    rng = np.random.default_rng(seed)
+    cosines: list[float] = []
+    for _ in range(n_splits):
+        pi = rng.permutation(len(pos))
+        ni = rng.permutation(len(neg))
+        ph, nh = len(pos) // 2, len(neg) // 2
+        dom_a = _dom(pos[pi[:ph]], neg[ni[:nh]])
+        dom_b = _dom(pos[pi[ph:]], neg[ni[nh:]])
+        den = np.linalg.norm(dom_a) * np.linalg.norm(dom_b)
+        cosines.append(float(np.dot(dom_a, dom_b) / den) if den > 1e-12 else 0.0)
+    return {
+        "mean": float(np.mean(cosines)),
+        "min": float(np.min(cosines)),
+        "n_splits": n_splits,
+        "ok": True,
+    }
+
+
+def concept_quality_report(
+    layer_activations: list[tuple[NDArray, NDArray]],
+    peak_layer: int,
+    *,
+    seed: int = 0,
+    n_splits: int = 5,
+    thresholds: dict[str, float] | None = None,
+) -> dict:
+    """Extraction-time QA/stability report for one concept × model.
+
+    Runs a battery of cheap intrinsic checks on the calibration activations at
+    the CAZ peak layer and returns a JSON-serializable dict intended to be
+    embedded in the per-concept extraction record (``caz_<concept>.json``), so
+    every extraction carries its own quality signals rather than relying on a
+    post-hoc audit.  All checks are intrinsic to a *single* extraction; the one
+    check that needs the whole roster — cross-model direction consistency — is
+    documented here but is necessarily a separate corpus-level pass (see
+    ``split_half_dom_reproducibility`` for why single-extraction checks cannot
+    catch a clean systematic inversion).
+
+    Checks
+    ------
+    - ``split_half_dom_cos`` — DOM reproducibility across calibration halves.
+    - ``peak_separation`` — Fisher-normalized class separation at the peak
+      (near-zero ⇒ classes mixed / concept not linearly present).
+    - ``peak_coherence`` — PCA explained-variance of the top direction.
+    - ``dom_norm`` — raw magnitude of the mean-difference direction.
+    - ``n_pos`` / ``n_neg`` / ``class_balance`` — structural sanity of the pools.
+    - ``nonfinite_frac`` — fraction of calibration rows dropped for NaN/Inf.
+    - ``flags`` — threshold-based booleans; ``quality_flag`` = "review" if any
+      fired, else "ok".
+
+    Parameters
+    ----------
+    layer_activations:
+        Same ``[(pos, neg), ...]`` per-layer list fed to
+        ``compute_layer_metrics`` (must include the peak layer).
+    peak_layer:
+        Index into ``layer_activations`` of the concept's CAZ peak.
+    seed, n_splits:
+        Control the split-half reproducibility estimate.
+    thresholds:
+        Override ``QUALITY_THRESHOLDS`` (merged over the defaults).
+    """
+    thr = {**QUALITY_THRESHOLDS, **(thresholds or {})}
+
+    if not layer_activations:
+        raise ValueError("layer_activations is empty")
+    if not (0 <= peak_layer < len(layer_activations)):
+        raise ValueError(f"peak_layer {peak_layer} out of range [0,{len(layer_activations)})")
+
+    pos_raw, neg_raw = layer_activations[peak_layer]
+    pos_raw = np.asarray(pos_raw, dtype=np.float64)
+    neg_raw = np.asarray(neg_raw, dtype=np.float64)
+    n_total = len(pos_raw) + len(neg_raw)
+    pos = pos_raw[np.isfinite(pos_raw).all(axis=1)] if len(pos_raw) else pos_raw
+    neg = neg_raw[np.isfinite(neg_raw).all(axis=1)] if len(neg_raw) else neg_raw
+    n_finite = len(pos) + len(neg)
+    nonfinite_frac = float((n_total - n_finite) / n_total) if n_total else 0.0
+
+    n_pos, n_neg = int(len(pos)), int(len(neg))
+    class_balance = float(min(n_pos, n_neg) / max(n_pos, n_neg)) if max(n_pos, n_neg) else 0.0
+    dom_norm = float(np.linalg.norm(_dom(pos, neg))) if (n_pos and n_neg) else 0.0
+    peak_sep = compute_separation(pos, neg)
+    peak_coh = compute_coherence(pos, neg)
+    sh = split_half_dom_reproducibility(pos, neg, seed=seed, n_splits=n_splits)
+
+    flags = {
+        "split_half_unstable": bool(sh["ok"] and sh["mean"] is not None
+                                    and sh["mean"] < thr["split_half_dom_cos"]),
+        "low_separation":      bool(peak_sep < thr["peak_separation"]),
+        "class_imbalance":     bool(class_balance < thr["class_balance"]),
+        "nonfinite":           bool(nonfinite_frac > thr["nonfinite_frac"]),
+        "degenerate":          bool(dom_norm < thr["dom_norm"]),
+        "insufficient_samples": bool(not sh["ok"]),
+    }
+
+    return {
+        "peak_layer": int(peak_layer),
+        "split_half_dom_cos": sh["mean"],
+        "split_half_dom_cos_min": sh["min"],
+        "split_half_n_splits": sh["n_splits"],
+        "peak_separation": peak_sep,
+        "peak_coherence": peak_coh,
+        "dom_norm": dom_norm,
+        "n_pos": n_pos,
+        "n_neg": n_neg,
+        "class_balance": class_balance,
+        "nonfinite_frac": nonfinite_frac,
+        "flags": flags,
+        "quality_flag": "review" if any(flags.values()) else "ok",
+        "thresholds": thr,
+        # NOTE: cross-model direction consistency (does this model×concept's DOM
+        # agree with the roster?) is the one check that catches a clean
+        # systematic label inversion, and it cannot be computed from a single
+        # extraction — it is a corpus-level batch pass over all models.
+        "cross_model_consistency": None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CAZ boundary detection
 # ---------------------------------------------------------------------------
 
