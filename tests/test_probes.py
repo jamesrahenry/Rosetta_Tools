@@ -19,6 +19,7 @@ import pytest
 from rosetta_tools.probes import (
     ProbeResult,
     extract_probe,
+    _split_indices,
     score_direction,
 )
 
@@ -231,6 +232,31 @@ class TestEvalSplit:
         p2 = extract_probe(acts, method="raw", eval_frac=0.2, seed=99)
         assert p1.layer == p2.layer
         assert p1.threshold == p2.threshold
+
+    def test_paired_split_never_straddles_a_pair(self):
+        """Both members of a contrastive pair land on the same side of the split.
+
+        Independent per-class permutation lets a pair straddle the boundary at
+        2*f*(1-f) — 32% at eval_frac=0.2. Because contrastive pairs are minimal
+        edits of one another, a straddling pair lets a fitted estimator score a
+        held-out item it has effectively already seen. Regression guard.
+        """
+        for seed in range(25):
+            pos_tr, neg_tr, pos_ev, neg_ev = _split_indices(250, 250, 0.2, seed)
+            assert set(pos_tr) == set(neg_tr)
+            assert set(pos_ev) == set(neg_ev)
+            assert not (set(pos_tr) & set(pos_ev))
+            assert len(pos_ev) == 50 and len(pos_tr) == 200
+
+    def test_unpaired_classes_fall_back_to_independent_split(self):
+        """Unequal class sizes cannot be paired; keep the per-class behaviour."""
+        pos_tr, neg_tr, pos_ev, neg_ev = _split_indices(250, 200, 0.2, 42)
+        assert len(pos_ev) == 50 and len(pos_tr) == 200
+        assert len(neg_ev) == 40 and len(neg_tr) == 160
+
+    def test_paired_flag_rejects_unequal_classes(self):
+        with pytest.raises(ValueError, match="equal class sizes"):
+            _split_indices(250, 200, 0.2, 42, paired=True)
 
     def test_different_seeds_may_differ(self):
         """Smoke test — different seeds produce different splits."""

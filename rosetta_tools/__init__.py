@@ -24,6 +24,6 @@ reporting   Pandas-based result loading — tidy DataFrames from JSON checkpoint
 viz         Matplotlib helpers — CAZ profiles, multi-concept overlays, peak heatmaps.
 """
 
-__version__ = "1.5.0"  # keep in sync with pyproject.toml [project].version
+__version__ = "1.6.0"  # keep in sync with pyproject.toml [project].version
 __author__ = "James Henry"
 __email__ = "jamesrahenry@henrynet.ca"

@@ -196,9 +196,42 @@ def _split_indices(
     n_neg: int,
     eval_frac: float,
     seed: int,
+    paired: bool | None = None,
 ) -> tuple[NDArray, NDArray, NDArray, NDArray]:
-    """Random train/eval index split for each class."""
+    """Train/eval index split, pair-aware when the two classes are paired.
+
+    Contrastive datasets (RCP and similar) are built as *pairs*: positive ``i``
+    and negative ``i`` are minimal edits of one another — same topic, same
+    phrasing, one attribute flipped.  Permuting the two classes independently
+    therefore lets a pair straddle the split: at ``eval_frac=0.2`` each pair has
+    a ``2 * 0.2 * 0.8 = 32%`` chance of having one member in train and its mate
+    in eval.  A *fitted* estimator (logistic regression, LDA) can key on that
+    training item's idiosyncratic content and score its near-identical held-out
+    mate, which inflates held-out AUROC.  A difference-of-means direction, being
+    a single centroid contrast, cannot exploit it — so the leak is not neutral
+    noise, it systematically favours fitted estimators over DoM.
+
+    When ``paired`` (auto-detected as ``n_pos == n_neg``), one permutation over
+    *pair* indices drives both class-side splits, so both members of a pair land
+    on the same side. Otherwise the classes are permuted independently, which is
+    the only thing that makes sense for unpaired data.
+    """
     rng = np.random.RandomState(seed)
+
+    if paired is None:
+        paired = n_pos == n_neg
+
+    if paired:
+        if n_pos != n_neg:
+            raise ValueError(
+                f"paired=True requires equal class sizes, got {n_pos} pos / {n_neg} neg"
+            )
+        n_eval = max(1, int(n_pos * eval_frac))
+        perm = rng.permutation(n_pos)
+        eval_idx, train_idx = perm[:n_eval], perm[n_eval:]
+        # Same pair indices on both sides — no pair straddles the boundary.
+        return (train_idx, train_idx.copy(), eval_idx, eval_idx.copy())
+
     n_pos_eval = max(1, int(n_pos * eval_frac))
     n_neg_eval = max(1, int(n_neg * eval_frac))
 
