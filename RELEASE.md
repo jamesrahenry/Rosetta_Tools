@@ -37,5 +37,36 @@ When a change in canonical needs to be visible to consumers:
 
 ## Version log
 
+- **v2.0.0** (2026-08-31) — major: migrated `extract_layer_wise_metrics()` and
+  `build_caz_record()` (the caz-record schema assembler) from
+  `Rosetta_Analysis/extraction/extract.py` into `rosetta_tools.extraction`, per
+  the scope rule (rosetta_tools = reusable CAZ/GEM pipeline; Rosetta_Analysis =
+  paper-writing support). New public API surface, so major rather than minor —
+  see `Rosetta_Analysis/PIPELINE_MIGRATION_PLAN.md` for the full rationale.
+  Also folds in three semantic-changing fixes that had accumulated unreleased
+  since v1.4.0 and already qualify as major under this file's own policy
+  (they change the meaning of existing artifacts, not just fix a bug):
+  - `dataset.load_concept_pairs` now uses a stable SHA256-derived default seed
+    instead of process-randomized `hash()` — pair sampling is now reproducible
+    across processes/runs (previously every invocation drew a different subset).
+  - `dataset.load_pairs` drops blank-text pairs instead of silently
+    misaligning pos/neg rows.
+  - `probes._split_indices` (via `extract_gem_probe`) is now pair-aware for
+    contrastive datasets, closing a train/eval leak that inflated fitted
+    estimators' (logreg/LDA) held-out AUROC relative to DOM. Already shifted
+    a published P2 supervised-baseline artifact's numbers — correctly.
+  There is no live v1.5.0/v1.6.0 — those version strings were set in-tree on
+  unpublished commits and are superseded by this tag.
+- **v1.4.0** (2026-07) — GPU host/queue matching by VRAM + host tags, Hopper
+  `urgent` priority, multi-GPU `device_map='balanced'`/capped `max_memory`,
+  `DirectionalShifter` additive ablation, gemma-2-9b-it-abliterated registered.
+- **v1.3.1** — split `viz.py` into `viz_style` (no backend) + `viz` (Agg + file
+  writers).
+- **v1.3.0** — dependency restructuring for PyPI publication (base + optional
+  extras), informative `ImportError` for GPU modules missing torch.
+- **v1.2.0** — bidirectional host-to-host model/result sync tooling
+  (`sync_models.sh`, `sync_results.sh`), GPU daemon disk-monitor + npy scratch
+  purge, 8-bit/4-bit quantization support in `gpu_utils`, CITATION.cff + Zenodo
+  DOI.
 - **v1.1.0** (2026-04-28) — per-region assembly thresholds, Fisher-weighted GEM extraction, `calibration_percentile` parameter, CIA-derived routing and vigilance utilities. First tag cut under this release discipline.
 - **v1.0.0** — pre-existing baseline.

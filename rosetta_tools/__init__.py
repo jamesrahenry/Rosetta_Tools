@@ -4,7 +4,10 @@ rosetta_tools — Shared tooling for the Rosetta interpretability research progr
 Modules
 -------
 gpu_utils   Device selection, dtype resolution, VRAM reporting, model teardown.
-extraction  Model-agnostic layer activation extraction (HF AutoModel).
+extraction  Model-agnostic layer activation extraction (HF AutoModel) and the
+            CAZ per-concept pipeline — extract_layer_wise_metrics() (per-layer
+            S/C/velocity/DOM + peak detection + inline QA) and build_caz_record()
+            (the caz_<concept>.json schema assembler).
 caz         CAZ metric computation — separation, coherence, velocity, boundary detection.
 probes      Probe extraction from contrastive activations — layer selection, direction, threshold.
             extract_probe() for raw/fisher/auroc layer selection; extract_gem_probe() for
@@ -24,6 +27,6 @@ reporting   Pandas-based result loading — tidy DataFrames from JSON checkpoint
 viz         Matplotlib helpers — CAZ profiles, multi-concept overlays, peak heatmaps.
 """
 
-__version__ = "1.6.0"  # keep in sync with pyproject.toml [project].version
+__version__ = "2.0.0"  # keep in sync with pyproject.toml [project].version
 __author__ = "James Henry"
 __email__ = "jamesrahenry@henrynet.ca"

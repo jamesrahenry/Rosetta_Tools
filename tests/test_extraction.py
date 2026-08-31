@@ -10,7 +10,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from rosetta_tools.extraction import _pool, extract_layer_activations
+from rosetta_tools.extraction import (
+    _pool,
+    build_caz_record,
+    extract_layer_activations,
+    extract_layer_wise_metrics,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -191,3 +196,77 @@ class TestExtractLayerActivations:
         acts = extract_layer_activations(model, tokenizer, ["one"], device="cpu")
         for a in acts:
             assert a.shape[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# CAZ pipeline tests (migrated from Rosetta_Analysis/extraction/extract.py)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractLayerWiseMetrics:
+
+    def _run(self, n_layers=4, hidden_dim=8, n_pos=6, n_neg=6, compute_quality=True):
+        model = _MockModel(n_layers=n_layers, hidden_dim=hidden_dim)
+        tokenizer = _MockTokenizer()
+        pos_texts = [f"pos {i}" for i in range(n_pos)]
+        neg_texts = [f"neg {i}" for i in range(n_neg)]
+        return extract_layer_wise_metrics(
+            model, tokenizer, pos_texts, neg_texts,
+            device="cpu", batch_size=4, compute_quality=compute_quality,
+        )
+
+    def test_shape_contract(self):
+        metrics, cal_acts, all_layer_cal = self._run(n_layers=4, hidden_dim=8, n_pos=6, n_neg=6)
+        # embedding layer ([0]) is dropped, so 4 transformer-block layers remain
+        assert metrics["n_layers"] == 4
+        assert len(metrics["metrics"]) == 4
+        assert 0 <= metrics["peak_layer"] < 4
+        assert cal_acts.shape == (12, 8)  # 6 pos + 6 neg at peak layer
+        assert all_layer_cal.shape == (4, 12, 8)
+
+    def test_quality_report_embedded_by_default(self):
+        metrics, _, _ = self._run(compute_quality=True)
+        assert "quality" in metrics
+
+    def test_quality_report_omitted_when_disabled(self):
+        metrics, _, _ = self._run(compute_quality=False)
+        assert "quality" not in metrics
+
+    def test_peak_layer_matches_max_separation(self):
+        metrics, _, _ = self._run()
+        seps = [m["separation_fisher"] for m in metrics["metrics"]]
+        assert metrics["peak_layer"] == int(np.argmax(seps))
+        assert metrics["peak_separation"] == max(seps)
+
+
+class TestBuildCazRecord:
+
+    def test_assembles_expected_keys(self):
+        record = build_caz_record(
+            model_id="mock-model",
+            concept="agency",
+            n_pairs=250,
+            split="train",
+            hidden_dim=8,
+            n_layers=4,
+            extraction_seconds=12.345,
+            layer_data={"peak_layer": 2},
+        )
+        assert record == {
+            "model_id": "mock-model",
+            "concept": "agency",
+            "n_pairs": 250,
+            "split": "train",
+            "hidden_dim": 8,
+            "n_layers": 4,
+            "token_pos": -1,
+            "extraction_seconds": 12.3,
+            "layer_data": {"peak_layer": 2},
+        }
+
+    def test_rounds_extraction_seconds(self):
+        record = build_caz_record(
+            model_id="m", concept="c", n_pairs=1, split="all",
+            hidden_dim=1, n_layers=1, extraction_seconds=1.0499, layer_data={},
+        )
+        assert record["extraction_seconds"] == 1.0
