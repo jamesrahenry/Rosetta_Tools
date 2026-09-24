@@ -9,8 +9,12 @@ Shared tooling for the Rosetta interpretability research program.
 Pin to a release tag — unpinned `main` can change between installs:
 
 ```bash
-pip install git+https://github.com/jamesrahenry/Rosetta_Tools.git@v1.1.0
+pip install git+https://github.com/jamesrahenry/Rosetta_Tools.git@v2.0.0
 ```
+
+`torch` and `transformers` are not declared dependencies — install the versions that suit your
+hardware. They are imported only by the model-facing modules (`extraction`, `ablation`,
+`gpu_utils`); the CAZ/GEM metric code needs only numpy/scipy/scikit-learn.
 
 Or for local development (editable):
 
@@ -37,13 +41,15 @@ Full API reference with signatures and examples: [`docs/api.md`](docs/api.md)
 | `rosetta_tools.gem` | GEM (Geometric Evolution Map) node construction and diagnostics |
 | `rosetta_tools.models` | Central model and concept registry — all scripts import from here |
 | `rosetta_tools.probes` | Linear probe training and evaluation for concept directions |
-| `rosetta_tools.feature_tracker` | Cross-layer feature tracking via greedy cosine matching |
-| `rosetta_tools.manifold_detector` | Eigenvalue census with Marchenko-Pastur noise floor |
 | `rosetta_tools.reporting` | Load CAZ checkpoint JSONs into tidy DataFrames |
-| `rosetta_tools.tracking` | Optional MLflow experiment tracking (fails gracefully if unavailable) |
 | `rosetta_tools.viz` | Standard CAZ profile plots and peak heatmaps |
-| `rosetta_tools.dataset` | JSONL pair loading, validation, and summary |
+| `rosetta_tools.viz_style` | Shared style constants for Rosetta figures |
+| `rosetta_tools.compound_monitor` | Framework for cross-module evidence propagation |
 | `rosetta_tools.paths` | Canonical data path resolution (`ROSETTA_CONCEPTS_ROOT`, repo-relative fallback) |
+
+`feature_tracker`, `manifold_detector` and `tracking` moved to
+[Rosetta_Analysis](https://github.com/jamesrahenry/Rosetta_Analysis) in May 2026; this package is
+now the reusable CAZ/GEM pipeline only.
 
 ### Quick example
 
@@ -68,7 +74,7 @@ metrics    = compute_layer_metrics(layer_acts)
 profile    = find_caz_regions_scored(metrics)
 
 for region in profile.regions:
-    print(f"CAZ peak layer {region.peak_layer}: S={region.peak_separation:.3f}, score={region.score:.3f}")
+    print(f"CAZ peak layer {region.peak}: S={region.peak_separation:.3f}, score={region.caz_score:.3f}")
 
 release_model(model)
 ```

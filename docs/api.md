@@ -164,42 +164,6 @@ from rosetta_tools.reporting import load_results_dir, load_scored_region_df
 
 ---
 
-## feature_tracker — Cross-Layer Feature Tracking
-
-Tracks principal component directions across layers via greedy cosine matching. Discovers model-native features (dark matter).
-
-```python
-from rosetta_tools.feature_tracker import track_features, Feature, FeatureMap
-```
-
-| Function | Signature | Purpose |
-|---|---|---|
-| `track_features` | `(layer_directions, layer_eigenvalues, n_layers_total, cos_threshold=0.5, concept_directions=None, model_id="") -> FeatureMap` | Track all features from birth to death across layers |
-
-**`Feature` fields:** `feature_id`, `birth_layer`, `death_layer`, `lifespan`, `eigenvalues` (per-layer), `cos_chain` (continuity), `peak_layer`, `peak_eigenvalue`, `concept_alignment` (max cos² per concept), `concept_alignment_trajectory` (per-layer cos² per concept).
-
-**`FeatureMap` methods:** `features_at_layer(layer)`, `persistent_features()`, `unlabeled_features()`
-
-**Concept direction formats:** Flat (`dict[str, NDArray]` — checks at peak layer only) or per-layer (`dict[str, dict[int, NDArray]]` — checks at every layer, stores trajectory).
-
----
-
-## manifold_detector — Unsupervised Manifold Census
-
-Eigenvalue analysis with Marchenko-Pastur noise floor. Quantifies dark matter.
-
-```python
-from rosetta_tools.manifold_detector import layer_manifold_census, LayerManifoldResult
-```
-
-| Function | Signature | Purpose |
-|---|---|---|
-| `layer_manifold_census` | `(layer_activations, concept_directions=None, n_top_eigenvalues=50, store_directions=False) -> ManifoldCensus` | Per-layer eigenvalue census: effective dimensionality, significant dimensions, concept coverage, residual structure |
-
-**`LayerManifoldResult` fields:** `layer_idx`, `effective_dim` (participation ratio), `significant_dims` (above MP threshold), `concept_coverage` (fraction explained by known probes), `top_eigenvalues`, `top_directions` (if `store_directions=True`).
-
----
-
 ## models — Model & Concept Registry
 
 Central registry for all models and concepts. All scripts import from here rather than maintaining their own lists.
@@ -207,7 +171,7 @@ Central registry for all models and concepts. All scripts import from here rathe
 ```python
 from rosetta_tools.models import (
     all_models, families, models_by_family, models_by_tag,
-    instruct_pairs, get_model, concept_names, concept_datasets,
+    instruct_pairs, get_model, all_concepts, get_concept,
 )
 ```
 
@@ -228,31 +192,15 @@ from rosetta_tools.models import (
 
 | Function | Signature | Purpose |
 |---|---|---|
-| `concept_names` | `() -> list[str]` | All 7 concepts in assembly order (shallow → deep) |
-| `concept_datasets` | `() -> dict[str, str]` | `{concept: dataset_filename}` |
-| `concepts_by_category` | `(category) -> list[str]` | Concepts for a category: `"epistemic"`, `"syntactic"`, `"relational"`, `"affective"` |
+| `all_concepts` | `() -> list[str]` | All registered concept names (18) |
+| `get_concept` | `(name) -> ConceptEntry \| None` | Full concept entry |
+| `concepts_by_category` | `(category) -> list[str]` | Concepts for one category |
+| `concepts_by_pipeline` | `(pipeline) -> list[str]` | Concepts used by a pipeline (`"caz"` or `"cia"`) |
+| `concept_assembly_depths` | `() -> dict[str, float]` | `{concept: mean assembly depth %}` for measured concepts |
 
 **Model families:** pythia, gpt2, opt, qwen2, gemma2, llama3, mistral, phi, plus `-instruct` variants.
 
 **Instruct models** are tagged `"instruct"` and disabled by default — they don't appear in `all_models()`, `families()`, or `models_by_tag()`. Query disabled ones explicitly with `models_by_tag("instruct", include_disabled=True)` or `instruct_pairs(include_disabled=True)`.
-
----
-
-## tracking — MLflow Integration
-
-Optional experiment tracking. Fails gracefully (no-ops) if MLflow is unavailable.
-
-```python
-from rosetta_tools.tracking import ensure_server, start_run, log_concept, end_run
-```
-
-| Function | Signature | Purpose |
-|---|---|---|
-| `configure` | `(tracking_uri=None) -> str \| None` | Set MLflow tracking URI |
-| `ensure_server` | `(store=None, port=5111) -> str` | Start MLflow server if not running |
-| `start_run` | `(experiment, model_id, params, run_name=None) -> Any \| None` | Begin tracked run. Returns run object or None |
-| `log_concept` | `(concept, summary) -> None` | Log per-concept metrics to active run |
-| `end_run` | `(run, out_dir=None) -> None` | Log artifacts and close run |
 
 ---
 
@@ -302,18 +250,9 @@ MODELS = ["EleutherAI/pythia-70m", "EleutherAI/pythia-160m", ...]
 from rosetta_tools.models import all_models, families
 ```
 
-### Feature tracker trajectory storage (April 2026)
+### Analysis modules moved out (May 2026)
 
-`track_features()` now stores per-layer concept alignment trajectories when given per-layer concept directions. The `concept_alignment` field (max cos²) is still populated for backward compatibility. New field:
-
-```python
-feature.concept_alignment_trajectory  # dict[str, dict[int, float]]
-# concept_name → {layer_index: cos²}
-```
-
-Pass per-layer directions to enable:
-```python
-concept_directions = {"credibility": {0: vec0, 1: vec1, ...}}  # per-layer
-# vs
-concept_directions = {"credibility": vec_peak}  # flat (legacy, peak-only)
-```
+`feature_tracker`, `manifold_detector` and `tracking` moved to
+[Rosetta_Analysis](https://github.com/jamesrahenry/Rosetta_Analysis) (`caz/` and `extraction/`);
+`feature_atlas`, `caz_registry` and `dark_feature_scanner` moved to Rosetta_Feature_Library.
+`rosetta_tools` is now the reusable CAZ/GEM pipeline only.
