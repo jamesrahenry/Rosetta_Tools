@@ -168,6 +168,68 @@ class EigThread:
 
 
 @dataclass
+class SettledSubspace:
+    """Multi-directional decomposition at ONE layer (typically handoff_layer),
+    found via iterative probe-and-remove (INLP). Distinct from EigThread's
+    k>1 design (multiple CANDIDATE threads tracked across the CAZ window,
+    with the single best one selected by cumulative_score, for surgical
+    single-direction ablation targeting): every direction kept here is
+    simultaneously concept-relevant, not competing alternatives, so none is
+    discarded once found.
+
+    Motivated by an empirical result (2026-09-23): across 51 concept x model
+    combinations (17 concepts x 3 architectures), a single direction removed
+    from the settled/handoff layer still leaves the concept ~70% decodable on
+    held-out data after 5 rounds of further removal (vs ~57% at shallow
+    layers) -- late/settled layers carry more concept-relevant structure than
+    a rank-1 (single settled_direction) probe captures.
+
+    Attributes
+    ----------
+    layer : int
+        Which layer this was computed at (not assumed to be handoff_layer,
+        so alternative layers can be compared cheaply during research).
+    extraction_method : str
+        "inlp" currently; "rlace" or raw top-k PCA are possible alternatives.
+    directions : list[list[float]]
+        k unit vectors, orthogonal by construction (each round's probe is
+        fit in the null space of every direction removed before it).
+    held_out_acc_curve, held_out_logloss_curve : list[float]
+        Diagnostic curves, one entry per round attempted (including the
+        round that triggered stopping, so the decay shape is visible even
+        past k_effective).
+    triage_pvalues : list[float]
+        Cheap screening p-value per round: a one-sided binomial test of
+        held-out accuracy against chance. Two earlier metrics were tried and
+        failed empirically before this one: training-data log-likelihood
+        deviance never detected exhaustion (a regularized fit can always
+        explain training labels well when n << d, which is every round
+        here); held-out log-loss deviance stopped too early because it is
+        sensitive to probability calibration, not just discrimination, and
+        penalized a genuinely-above-chance but under-confident fit.
+    permutation_pvalues : list[float | None]
+        Permutation-test p-value for rounds where the triage screen was
+        ambiguous (not obviously significant nor obviously exhausted);
+        None where the triage screen alone was decisive.
+    k_effective : int
+        Number of directions actually kept (<= len(directions)).
+    stopping_reason : str
+        "triage_clear_stop" | "permutation_stop" | "coef_collapsed" |
+        "max_rounds".
+    """
+
+    layer: int
+    extraction_method: str = "inlp"
+    directions: list = field(default_factory=list)
+    held_out_acc_curve: list = field(default_factory=list)
+    held_out_logloss_curve: list = field(default_factory=list)
+    triage_pvalues: list = field(default_factory=list)
+    permutation_pvalues: list = field(default_factory=list)
+    k_effective: int = 0
+    stopping_reason: str = ""
+
+
+@dataclass
 class GEMNode:
     """GEM node for a single CAZ assembly event.
 
@@ -242,6 +304,12 @@ class GEMNode:
     hidden_dim: int
     k: int
     phase: int = 1
+
+    # Multi-directional structure at the settled layer (see SettledSubspace
+    # docstring for how this differs from the threads/k>1 fields above).
+    # Optional and None unless explicitly computed -- does not affect any
+    # existing k=1 Phase 1 consumer.
+    settled_subspace: SettledSubspace | None = None
 
     @property
     def concept_thread(self) -> EigThread:
@@ -491,6 +559,87 @@ def build_gem_node_k1(
     )
 
 
+def build_gem_node_phase2(
+    caz_data: dict,
+    region: CAZRegion,
+    caz_index: int,
+    h_pos_by_layer: dict[int, np.ndarray],
+    h_neg_by_layer: dict[int, np.ndarray],
+    k: int = 3,
+    attention_paradigm: str = "unknown",
+) -> GEMNode:
+    """Build a Phase 2 GEM node: k candidate eigenvector threads tracked
+    across the CAZ window via extract_phase2_threads, with the best one
+    selected by cumulative_score (EigThread's own documented design).
+    Requires raw per-example activations -- unlike build_gem_node_k1, this
+    cannot be built from caz_*.json alone.
+    """
+    metrics = caz_data["layer_data"]["metrics"]
+    n_layers = int(caz_data["layer_data"]["n_layers"])
+    hidden_dim = len(metrics[0]["dom_vector"])
+
+    window_layers = list(range(region.start, min(region.end + 1, len(metrics))))
+    if not window_layers:
+        window_layers = [region.peak]
+
+    missing = [l for l in window_layers if l not in h_pos_by_layer or l not in h_neg_by_layer]
+    if missing:
+        raise ValueError(
+            f"build_gem_node_phase2: h_pos_by_layer/h_neg_by_layer missing layers {missing} "
+            f"needed for CAZ window {window_layers}"
+        )
+
+    dom_vectors_by_layer = {
+        m["layer"]: np.asarray(m["dom_vector"], dtype=np.float64)
+        for m in metrics if "dom_vector" in m
+    }
+
+    threads, best_thread_id = extract_phase2_threads(
+        h_pos_by_layer, h_neg_by_layer, window_layers, k=k,
+        dom_vectors_by_layer=dom_vectors_by_layer,
+    )
+    best = threads[best_thread_id]
+    settled_direction = np.asarray(best.directions[-1], dtype=np.float64)
+
+    handoff_layer = min(region.end + 1, n_layers - 1)
+    handoff_cosine = 0.0
+    if handoff_layer < len(metrics) and "dom_vector" in metrics[handoff_layer]:
+        hoff_dv = np.asarray(metrics[handoff_layer]["dom_vector"], dtype=np.float64)
+        hoff_norm = np.linalg.norm(hoff_dv)
+        settled_norm = np.linalg.norm(settled_direction)
+        if hoff_norm > 1e-12 and settled_norm > 1e-12:
+            handoff_cosine = float(np.abs(np.dot(settled_direction / settled_norm, hoff_dv / hoff_norm)))
+
+    entry_exit_cosine = float(np.abs(np.dot(
+        np.asarray(best.directions[0], dtype=np.float64), settled_direction,
+    )))
+    max_rotation = 0.0
+    for c in best.cos_chain[1:]:
+        max_rotation = max(max_rotation, 1.0 - c)
+
+    return GEMNode(
+        concept=caz_data.get("concept", ""),
+        model_id=caz_data.get("model_id", ""),
+        caz_index=caz_index,
+        caz_start=region.start,
+        caz_peak=region.peak,
+        caz_end=region.end,
+        caz_score=region.caz_score,
+        attention_paradigm=attention_paradigm,
+        settled_direction=settled_direction.tolist(),
+        handoff_layer=handoff_layer,
+        handoff_cosine=round(handoff_cosine, 4),
+        threads=threads,
+        concept_thread_id=best_thread_id,
+        entry_exit_cosine=round(entry_exit_cosine, 4),
+        max_rotation_per_layer=round(max_rotation, 4),
+        n_layers_total=n_layers,
+        hidden_dim=hidden_dim,
+        k=k,
+        phase=2,
+    )
+
+
 # ---------------------------------------------------------------------------
 # ConceptGEM builder
 # ---------------------------------------------------------------------------
@@ -554,6 +703,10 @@ def build_concept_gem(
     multimodal_data: dict | None = None,
     attention_paradigm: str = "unknown",
     k: int = 1,
+    h_pos_by_layer: dict[int, np.ndarray] | None = None,
+    h_neg_by_layer: dict[int, np.ndarray] | None = None,
+    compute_settled_subspace: bool = False,
+    settled_subspace_kwargs: dict | None = None,
 ) -> ConceptGEM:
     """Build the full ConceptGEM for one concept x model.
 
@@ -572,8 +725,28 @@ def build_concept_gem(
     attention_paradigm : str
         Architecture type.
     k : int
-        Number of eigenvector threads to track.  Only k=1 is
-        implemented in Phase 1.
+        Number of eigenvector threads to track. k=1 (default) uses
+        build_gem_node_k1 and needs nothing beyond caz_data. k>1 uses
+        build_gem_node_phase2 and REQUIRES h_pos_by_layer/h_neg_by_layer
+        (raw per-example activations, not derivable from caz_*.json alone
+        -- e.g. loaded from calibration_alllayer_{concept}.npy).
+    h_pos_by_layer, h_neg_by_layer : dict[int, np.ndarray] | None
+        Layer -> (n_examples, hidden_dim) raw activations for the positive/
+        negative contrastive examples. Optional; default (None) reproduces
+        the exact pre-2026-09-25 k=1-only behavior. Required if k>1 or
+        compute_settled_subspace=True.
+    compute_settled_subspace : bool
+        If True (and activations provided), additionally compute a
+        SettledSubspace at each node's handoff_layer via INLP (see
+        attach_settled_subspace). Expensive -- caution advised (2026-09-24
+        validation on a 70M model took 30-90+ minutes for one layer when
+        several removal rounds landed in the ambiguous triage band and
+        needed a full permutation test). Off by default; not something to
+        enable as a blanket default across a corpus without first checking
+        the expected runtime.
+    settled_subspace_kwargs : dict | None
+        Passed through to attach_settled_subspace (e.g. max_rounds, n_perm)
+        when compute_settled_subspace=True.
     """
     metrics_raw = caz_data["layer_data"]["metrics"]
 
@@ -611,9 +784,25 @@ def build_concept_gem(
                 caz_data, region, idx, attention_paradigm,
             )
         else:
-            raise NotImplementedError(
-                f"Phase 2 (k={k}) not yet implemented.  Use k=1."
+            if h_pos_by_layer is None or h_neg_by_layer is None:
+                raise ValueError(
+                    f"Phase 2 (k={k}) requires h_pos_by_layer/h_neg_by_layer "
+                    "(raw per-example activations) -- caz_*.json alone isn't "
+                    "enough. Load calibration_alllayer_{concept}.npy or pass k=1."
+                )
+            node = build_gem_node_phase2(
+                caz_data, region, idx, h_pos_by_layer, h_neg_by_layer,
+                k=k, attention_paradigm=attention_paradigm,
             )
+
+        if compute_settled_subspace and h_pos_by_layer is not None and h_neg_by_layer is not None:
+            hl = node.handoff_layer
+            if hl in h_pos_by_layer and hl in h_neg_by_layer:
+                node = attach_settled_subspace(
+                    node, h_pos_by_layer[hl], h_neg_by_layer[hl],
+                    **(settled_subspace_kwargs or {}),
+                )
+
         nodes.append(node)
 
     # Dependency classification
@@ -668,7 +857,9 @@ def gem_from_dict(data: dict) -> ConceptGEM:
     nodes = []
     for nd in data.get("nodes", []):
         threads = [EigThread(**td) for td in nd.pop("threads", [])]
-        nodes.append(GEMNode(threads=threads, **nd))
+        settled_subspace_dict = nd.pop("settled_subspace", None)
+        settled_subspace = SettledSubspace(**settled_subspace_dict) if settled_subspace_dict else None
+        nodes.append(GEMNode(threads=threads, settled_subspace=settled_subspace, **nd))
 
     return ConceptGEM(
         concept=data["concept"],
@@ -985,3 +1176,285 @@ def stage_detail(
         f"L{dom_start}–{dom_end} (score={dom_score:.2f}), "
         f"also {', '.join(others)}{routing_str}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 extraction: two distinct capabilities, both requiring raw
+# per-example activations (unlike build_gem_node_k1 above, which only reads
+# pre-computed caz_*.json summaries). Added 2026-09-24, motivated by an
+# empirical result: across 51 concept x model combinations (17 concepts x 3
+# architectures: pythia-70m, pythia-160m, Qwen2.5-0.5B-Instruct), a single
+# direction removed from the settled/handoff layer still leaves the concept
+# ~70% decodable on held-out data after 5 further rounds of removal (vs ~57%
+# at shallow layers, Wilcoxon p=8.6e-09) -- late/settled layers carry more
+# concept-relevant structure than a rank-1 settled_direction probe captures.
+#
+#   1. extract_phase2_threads -- completes the ORIGINAL Phase 2 design named
+#      in EigThread's own docstring: several candidate rotating eigenvector
+#      threads tracked layer-to-layer across the CAZ window, with the single
+#      best one selected by cumulative_score, for surgical single-direction
+#      ablation targeting. Produces real EigThread objects (not a separate
+#      type), since GEMNode.threads is already typed for exactly this.
+#
+#   2. extract_settled_subspace -- a DIFFERENT question this original design
+#      doesn't answer: several directions that are all SIMULTANEOUSLY
+#      concept-relevant at one layer (typically handoff_layer), none
+#      discarded once found (not competing candidates for "the" thread).
+#      Populates GEMNode.settled_subspace, not threads.
+# ---------------------------------------------------------------------------
+
+
+def _topk_eigvecs(hp: np.ndarray, hn: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Top-k eigenvectors/eigenvalues of the paired-difference second moment
+    cov(d)+mu*mu^T at one layer (same object delta-PCA's leading eigenvector
+    already summarizes -- see the GEM paper's delta-PCA comparison)."""
+    diffs = hp - hn
+    _, s, vt = np.linalg.svd(diffs, full_matrices=False)
+    eigvals = (s ** 2) / diffs.shape[0]
+    order = np.argsort(eigvals)[::-1][:k]
+    return vt[order], eigvals[order]  # (k, d), (k,)
+
+
+def extract_phase2_threads(
+    h_pos_by_layer: dict[int, np.ndarray],
+    h_neg_by_layer: dict[int, np.ndarray],
+    layer_indices: list[int],
+    k: int = 3,
+    dom_vectors_by_layer: dict[int, np.ndarray] | None = None,
+) -> tuple[list[EigThread], int]:
+    """Track k candidate eigenvector threads across a CAZ window and select
+    the best one by cumulative_score, per EigThread's own docstring.
+
+    h_pos_by_layer / h_neg_by_layer : dict layer -> (n, d) raw activations.
+    dom_vectors_by_layer : per-layer dom_vector (from caz_*.json), used to
+        compute concept_alignments = |cos(direction, dom_vector)| as
+        EigThread's docstring specifies. Without it, alignment can't be
+        scored and every thread gets alignment 1.0 (cumulative_score then
+        just ranks threads by raw eigenvalue).
+
+    Matching is a greedy bipartite assignment: for each existing thread, the
+    available top-k candidate at the next layer with maximum |cosine| to its
+    previous direction extends it. Validated 2026-09-24 on pythia-70m/
+    negation: the selected best thread matched the independently-computed
+    k=1 dom_vector trajectory at 0.93-0.97 cosine across all 6 layers, and
+    had visibly higher layer-to-layer continuity (cos_chain 0.33-0.69) than
+    the two rejected candidates (0.04-0.29) -- the selection criterion
+    correctly separates the real thread from noise.
+    """
+    threads: list[EigThread] | None = None
+    doms: dict[int, np.ndarray] = {}
+
+    for layer in layer_indices:
+        vecs, eigvals = _topk_eigvecs(h_pos_by_layer[layer], h_neg_by_layer[layer], k)
+        if dom_vectors_by_layer is not None and layer in dom_vectors_by_layer:
+            dom = np.asarray(dom_vectors_by_layer[layer], dtype=np.float64)
+            doms[layer] = dom / np.linalg.norm(dom)
+
+        if threads is None:
+            threads = [
+                EigThread(thread_id=i, layer_indices=[layer], directions=[vecs[i].tolist()],
+                          eigenvalues=[float(eigvals[i])], concept_alignments=[], cos_chain=[1.0])
+                for i in range(k)
+            ]
+            continue
+
+        used: set[int] = set()
+        for th in threads:
+            last = np.array(th.directions[-1])
+            sims = [abs(np.dot(last, vecs[j])) if j not in used else -1.0 for j in range(k)]
+            j_best = int(np.argmax(sims))
+            used.add(j_best)
+            sign = np.sign(np.dot(last, vecs[j_best])) or 1.0
+            th.directions.append((sign * vecs[j_best]).tolist())
+            th.layer_indices.append(layer)
+            th.eigenvalues.append(float(eigvals[j_best]))
+            th.cos_chain.append(float(sims[j_best]))
+
+    assert threads is not None
+    for th in threads:
+        if doms:
+            alignments = [
+                abs(float(np.dot(np.array(d), doms[l]))) if l in doms else float("nan")
+                for d, l in zip(th.directions, th.layer_indices)
+            ]
+        else:
+            alignments = [1.0] * len(th.directions)
+        th.concept_alignments = alignments
+        valid_mask = [not np.isnan(a) for a in alignments]
+        valid = np.array([a for a, m in zip(alignments, valid_mask) if m])
+        valid_eig = np.array([e for e, m in zip(th.eigenvalues, valid_mask) if m])
+        th.cumulative_score = float(np.sum(valid_eig * valid)) if len(valid) else 0.0
+        th.mean_eigenvalue = float(np.mean(th.eigenvalues))
+        th.mean_alignment = float(np.mean(valid)) if len(valid) else 0.0
+
+    best = max(threads, key=lambda t: t.cumulative_score)
+    return threads, best.thread_id
+
+
+def _project_out(X: np.ndarray, w: np.ndarray) -> np.ndarray:
+    w = w / np.linalg.norm(w)
+    return X - np.outer(X @ w, w)
+
+
+def _held_out_logloss(clf, X: np.ndarray, y: np.ndarray, eps: float = 1e-12) -> float:
+    p = np.clip(clf.predict_proba(X)[:, 1], eps, 1 - eps)
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
+def _triage_binomial_pvalue(clf, X_test: np.ndarray, y_test: np.ndarray) -> float:
+    """Cheap triage screen: one-sided binomial test of held-out ACCURACY
+    against chance (0.5). Two earlier metrics were tried and failed
+    empirically (2026-09-24), recorded here rather than silently dropped:
+      - training-data log-likelihood deviance vs. chi2(1): with n<<d (every
+        round here), a regularized fit can always explain the training
+        labels well after several rounds of removal, so it never detected
+        exhaustion -- confirmed empirically: it stayed ~0 for 10 straight
+        rounds on a layer whose held-out accuracy had already decayed to
+        chance by round 8.
+      - held-out log-loss deviance: fixed the training-set problem, but
+        log-loss is sensitive to *calibrated* probability confidence, not
+        just discrimination -- it called a layer "exhausted" at 73.8%
+        held-out accuracy because the fit's probabilities were under-
+        confident despite being reliably correct.
+    A binomial test on hard accuracy sidesteps both failure modes: immune to
+    training-set overfitting (only looks at held-out predictions) and immune
+    to calibration (only cares about right/wrong, not confidence)."""
+    from scipy.stats import binomtest
+    n = len(y_test)
+    correct = int(round(clf.score(X_test, y_test) * n))
+    return float(binomtest(correct, n, p=0.5, alternative="greater").pvalue)
+
+
+def _permutation_pvalue(
+    Xtr: np.ndarray, ytr: np.ndarray, Xte: np.ndarray, yte: np.ndarray,
+    real_logloss: float, n_perm: int = 200, C: float = 1.0, rng=None,
+) -> float:
+    """Shuffle TRAINING labels, refit, score on the REAL held-out set, build
+    a null distribution of held-out log-loss under label-shuffled fits.
+    Returns the fraction of shuffled fits that do at least as well as the
+    real fit (lower log-loss => more significant => small p). Expensive
+    (n_perm refits) -- only called when the triage screen is ambiguous."""
+    from sklearn.linear_model import LogisticRegression
+    rng = rng or np.random.default_rng(0)
+    null_losses = []
+    for _ in range(n_perm):
+        y_shuf = rng.permutation(ytr)
+        clf = LogisticRegression(max_iter=2000, C=C)
+        try:
+            clf.fit(Xtr, y_shuf)
+        except Exception:
+            continue
+        null_losses.append(_held_out_logloss(clf, Xte, yte))
+    null_losses = np.array(null_losses)
+    p = (np.sum(null_losses <= real_logloss) + 1) / (len(null_losses) + 1)
+    return float(p)
+
+
+def extract_settled_subspace(
+    X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray, y_test: np.ndarray,
+    layer: int,
+    max_rounds: int = 10,
+    stop_alpha: float = 0.05,
+    triage_clear_significant: float = 1e-4,
+    triage_clear_null: float = 0.5,
+    n_perm: int = 200,
+    C: float = 1.0,
+    rng=None,
+) -> SettledSubspace:
+    """Iteratively fit-and-remove (INLP) at one layer. Each round, a triage
+    binomial p-value decides stop/continue cheaply; the expensive permutation
+    test only runs when that triage p-value is ambiguous -- not solidly in
+    the "obviously still significant" (<triage_clear_significant) or
+    "obviously exhausted" (>triage_clear_null) extremes. Given n<<d in every
+    round (X has as many or more feature dimensions as training examples),
+    the triage number is a screen, not a rigorous test on its own; the
+    permutation test is the trustworthy fallback.
+
+    Caution (2026-09-24): the permutation test is the accuracy bottleneck --
+    each ambiguous round costs n_perm refits. On a 70M-parameter model this
+    took 30-90+ minutes for one layer when several rounds landed in the
+    ambiguous band. Not yet fast enough to run across a full corpus; a
+    production version would want fewer permutations, a faster-converging
+    solver, or warm-starting from the previous round's coefficients.
+    """
+    rng = rng or np.random.default_rng(0)
+    from sklearn.linear_model import LogisticRegression
+
+    sub = SettledSubspace(layer=layer, extraction_method="inlp")
+    Xtr, Xte = X_train.copy(), X_test.copy()
+
+    for r in range(max_rounds):
+        clf = LogisticRegression(max_iter=2000, C=C)
+        clf.fit(Xtr, y_train)
+        acc = clf.score(Xte, y_test)
+        logloss = _held_out_logloss(clf, Xte, y_test)
+        w = clf.coef_[0]
+        w_norm = np.linalg.norm(w)
+
+        sub.held_out_acc_curve.append(float(acc))
+        sub.held_out_logloss_curve.append(logloss)
+
+        if w_norm < 1e-8:
+            sub.triage_pvalues.append(1.0)
+            sub.permutation_pvalues.append(None)
+            sub.stopping_reason = "coef_collapsed"
+            break
+
+        triage_p = _triage_binomial_pvalue(clf, Xte, y_test)
+        sub.triage_pvalues.append(triage_p)
+
+        if triage_p < triage_clear_significant:
+            sub.permutation_pvalues.append(None)
+            sub.directions.append((w / w_norm).tolist())
+            sub.k_effective = r + 1
+            Xtr = _project_out(Xtr, w)
+            Xte = _project_out(Xte, w)
+            continue
+
+        if triage_p > triage_clear_null:
+            sub.permutation_pvalues.append(None)
+            sub.stopping_reason = "triage_clear_stop"
+            break
+
+        perm_p = _permutation_pvalue(Xtr, y_train, Xte, y_test, logloss, n_perm=n_perm, C=C, rng=rng)
+        sub.permutation_pvalues.append(perm_p)
+        if perm_p > stop_alpha:
+            sub.stopping_reason = "permutation_stop"
+            break
+
+        sub.directions.append((w / w_norm).tolist())
+        sub.k_effective = r + 1
+        Xtr = _project_out(Xtr, w)
+        Xte = _project_out(Xte, w)
+    else:
+        sub.stopping_reason = "max_rounds"
+
+    return sub
+
+
+def attach_settled_subspace(
+    node: GEMNode,
+    h_pos: np.ndarray,
+    h_neg: np.ndarray,
+    test_size: float = 0.3,
+    random_state: int = 0,
+    **extract_kwargs: Any,
+) -> GEMNode:
+    """Compute a SettledSubspace at `node.handoff_layer` from raw per-example
+    activations and return a new GEMNode with it attached. Non-mutating
+    (dataclasses.replace), matching the functional style of the builders
+    above. h_pos, h_neg: (n_examples, hidden_dim) raw activations at
+    node.handoff_layer for the positive/negative contrastive examples --
+    NOT derivable from caz_*.json alone, must come from the extraction
+    pipeline that produced the original activations.
+    """
+    from dataclasses import replace
+    from sklearn.model_selection import train_test_split
+
+    n = h_pos.shape[0]
+    X = np.concatenate([h_pos, h_neg], axis=0).astype(np.float64)
+    y = np.concatenate([np.ones(n), np.zeros(n)])
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y)
+
+    sub = extract_settled_subspace(Xtr, ytr, Xte, yte, layer=node.handoff_layer, **extract_kwargs)
+    return replace(node, settled_subspace=sub)
