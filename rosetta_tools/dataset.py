@@ -144,6 +144,59 @@ def load_concept_pairs(
     return rng.sample(all_pairs, n)
 
 
+def pair_set_provenance(
+    pairs: list["ConceptPair"],
+    concept: str = "",
+    split: str | None = None,
+    n_requested: int | None = None,
+) -> dict:
+    """Identify exactly which pairs a run used (2026-10-15).
+
+    Returns a JSON-safe dict:
+      sha256        over the ordered (pair_id, pos_text, neg_text) triples,
+                    so any change in membership, order or text changes it
+      n_pairs       len(pairs)
+      concept, split, n_requested
+      pairs_file    canonical file path, relative to the Rosetta_Concept_Pairs
+                    repo when it can be resolved (machine-independent),
+                    else absolute
+      repo_commit   Rosetta_Concept_Pairs git HEAD (None if not a git checkout)
+      file_dirty    True if that file has uncommitted changes (None if unknown)
+
+    Motivation: Rosetta_Concept_Pairs a088c29 (2026-07-07) changed the
+    records of most concept files, so a later run with the same
+    load_concept_pairs() call drew a different 250-pair sample than the
+    June 2026 extractions, silently. Recording this makes that detectable.
+    """
+    import subprocess
+    h = hashlib.sha256()
+    for p in pairs:
+        h.update(json.dumps([p.pair_id, p.pos_text, p.neg_text], ensure_ascii=False).encode())
+        h.update(b"\n")
+    out: dict = {
+        "sha256": h.hexdigest(), "n_pairs": len(pairs), "concept": concept,
+        "split": split, "n_requested": n_requested,
+        "pairs_file": None, "repo_commit": None, "file_dirty": None,
+    }
+    try:
+        root = _concepts_root()
+        f = root / f"{concept}_consensus_pairs.jsonl"
+        out["pairs_file"] = str(f)
+        top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        if top:
+            out["pairs_file"] = str(f.relative_to(top)) if f.is_relative_to(top) else str(f)
+            out["repo_commit"] = subprocess.run(
+                ["git", "-C", top, "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5).stdout.strip() or None
+            out["file_dirty"] = bool(subprocess.run(
+                ["git", "-C", top, "status", "--porcelain", "--", str(f)],
+                capture_output=True, text=True, timeout=5).stdout.strip())
+    except Exception:
+        pass
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------

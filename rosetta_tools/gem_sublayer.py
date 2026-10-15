@@ -847,6 +847,7 @@ def extract_concept_layer_profile(
     device: str = "cpu",
     config: GEMExtractionConfig | None = None,
     dataset: str | None = None,
+    pair_set: dict | None = None,
 ) -> tuple[LayerProfile, dict[str, np.ndarray], dict[str, dict]]:
     """Capture + build_layer_profile for one concept's contrastive texts,
     driven by a GEMExtractionConfig (default: GEMExtractionConfig(), i.e.
@@ -880,7 +881,7 @@ def extract_concept_layer_profile(
         capture_dtype="float32",
         hook_points=hooks,
         pooling=cfg.pooling, max_length=cfg.max_length, batch_size=cfg.batch_size,
-        device=str(device), dataset=dataset,
+        device=str(device), dataset=dataset, pair_set=pair_set,
         notes=[f"additivity tol: {cfg.additivity_tol if cfg.additivity_tol is not None else ADDITIVITY_TOL.get(cap_p.model_dtype)}",
                "max recon residual rel stream per layer: "
                + ", ".join(f"{x:.3g}" for x in per_layer)],

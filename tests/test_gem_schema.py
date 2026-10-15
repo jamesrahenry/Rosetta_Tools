@@ -411,3 +411,52 @@ class TestConfigAndDetection:
             build_concept_gem(caz, detection_score="projected")
         with pytest.raises(ValueError):
             build_concept_gem(caz, detection_score="bogus")
+
+
+# ---------------------------------------------------------------------------
+# Pair-set provenance (2026-10-15)
+# ---------------------------------------------------------------------------
+
+class TestPairSetProvenance:
+    def _pairs(self, n=4):
+        from rosetta_tools.dataset import ConceptPair
+        return [ConceptPair(pair_id=f"p{i}", domain="d", topic="t",
+                            pos_text=f"pos {i}", neg_text=f"neg {i}") for i in range(n)]
+
+    def test_hash_sensitive_to_membership_order_and_text(self):
+        from rosetta_tools.dataset import pair_set_provenance
+        ps = self._pairs()
+        h = pair_set_provenance(ps, "c")["sha256"]
+        assert pair_set_provenance(self._pairs(), "c")["sha256"] == h
+        assert pair_set_provenance(ps[::-1], "c")["sha256"] != h
+        assert pair_set_provenance(ps[:3], "c")["sha256"] != h
+        alt = self._pairs(); alt[0].pos_text = "pos 0!"
+        assert pair_set_provenance(alt, "c")["sha256"] != h
+        d = pair_set_provenance(ps, "c", "train", 250)
+        assert d["n_pairs"] == 4 and d["n_requested"] == 250 and d["split"] == "train"
+        json.dumps(d)  # JSON-safe
+
+    def test_provenance_roundtrip_and_backcompat(self):
+        from rosetta_tools.dataset import pair_set_provenance
+        from rosetta_tools.gem import Provenance
+        s = _synthetic_stream()
+        ps = pair_set_provenance(self._pairs(), "c")
+        prof, _, _ = build_layer_profile(s["pos"][1], s["neg"][1], n_perm=0,
+                                         provenance=Provenance(method="t", pair_set=ps))
+        g = attach_layer_profile(gem_from_dict(_v1_dict(d=16)), prof)
+        g2 = gem_from_dict(json.loads(json.dumps(gem_to_dict(g))))
+        assert g2.layer_profile.provenance.pair_set == ps
+        # a v2 provenance dict written before pair_set existed still loads
+        d = gem_to_dict(g)
+        del d["layer_profile"]["provenance"]["pair_set"]
+        assert gem_from_dict(d).layer_profile.provenance.pair_set is None
+
+    def test_real_dataset_records_commit(self):
+        from rosetta_tools.dataset import load_concept_pairs, pair_set_provenance
+        try:
+            pairs = load_concept_pairs("negation", n=5, split="train")
+        except FileNotFoundError:
+            pytest.skip("Rosetta_Concept_Pairs not present")
+        d = pair_set_provenance(pairs, "negation", "train", 5)
+        assert d["pairs_file"].endswith("negation_consensus_pairs.jsonl")
+        assert d["repo_commit"] is None or len(d["repo_commit"]) == 40

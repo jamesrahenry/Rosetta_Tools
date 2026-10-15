@@ -290,6 +290,9 @@ class Provenance:
     batch_size: int | None = None
     device: str | None = None
     dataset: str | None = None          # corpus id / split, free text
+    # Exact pair set used (rosetta_tools.dataset.pair_set_provenance): sha256
+    # over ordered (pair_id, pos, neg), Rosetta_Concept_Pairs commit + file.
+    pair_set: dict | None = None
     notes: list = field(default_factory=list)
 
 
