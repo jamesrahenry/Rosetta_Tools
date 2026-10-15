@@ -240,7 +240,7 @@ class TestProfile:
         assert prof.layers[2].sublayers[1].diff_proj_u_out > prof.layers[2].sublayers[0].diff_proj_u_out
         assert arrays["profile.proj_attn"].shape == (120, 4, 2)
         assert arrays["profile.null_projected"].shape == (5, 20)
-        assert "profile.attn_acts" not in arrays
+        assert arrays["profile.attn_acts"].shape == (4, 120, 16)  # default on (D3)
 
     def test_stream_only_backfill(self):
         s = _synthetic_stream()
@@ -273,10 +273,40 @@ class TestProfile:
         with pytest.raises(ValueError, match="sha256"):
             load_gem_sidecar(path)
 
-    def test_full_sublayer_acts_optional(self):
-        _, arrays, _ = self._profile(store_full_sublayer_acts=True)
+    def test_full_sublayer_acts_default_on_and_switchable(self):
+        _, arrays, _ = self._profile()
         assert arrays["profile.attn_acts"].dtype == np.float16
-        assert arrays["profile.attn_acts"].shape == (4, 120, 16)
+        assert arrays["profile.mlp_acts"].shape == (4, 120, 16)
+        _, arrays, _ = self._profile(store_full_sublayer_acts=False)
+        assert "profile.attn_acts" not in arrays
+
+    def test_final_norm_record(self):
+        s = _synthetic_stream()
+        rng = np.random.default_rng(5)
+        fp = s["pos"][1][-1] / np.linalg.norm(s["pos"][1][-1], axis=1, keepdims=True)
+        fn = s["neg"][1][-1] / np.linalg.norm(s["neg"][1][-1], axis=1, keepdims=True)
+        prof, arrays, _ = self._profile(final_norm_pos=fp, final_norm_neg=fn)
+        assert prof.final_norm.layer == 3 and prof.final_norm.sublayers is None
+        assert prof.final_norm.separation_fisher == pytest.approx(compute_separation(fp, fn))
+        assert prof.final_norm.null_projected.n_perm == 20
+        assert arrays["profile.final_norm_direction"].shape == (16,)
+        assert arrays["profile.final_norm_null_projected"].shape == (20,)
+        g = gem_from_dict(json.loads(json.dumps(gem_to_dict(
+            attach_layer_profile(gem_from_dict(_v1_dict(d=16)), prof)))))
+        assert g.layer_profile.final_norm.separation_projected == prof.final_norm.separation_projected
+        del rng
+
+    def test_inline_directions_option(self, tmp_path):
+        prof, arrays, docs = self._profile()
+        gem = attach_layer_profile(gem_from_dict(_v1_dict(d=16)), prof)
+        save_gem(gem, tmp_path / "a.json", arrays, docs)
+        assert load_gem(tmp_path / "a.json").layer_profile.layers[0].direction is None
+        save_gem(gem, tmp_path / "b.json", arrays, docs, inline_directions=True)
+        g = load_gem(tmp_path / "b.json")
+        np.testing.assert_allclose(g.layer_profile.layers[2].direction,
+                                   arrays["profile.directions"][2], atol=1e-6)
+        with pytest.raises(ValueError):
+            save_gem(gem_from_dict(_v1_dict()), tmp_path / "c.json", inline_directions=True)
 
     def test_decompose_settled_subspace_identity(self):
         prof, arrays, _ = self._profile()
@@ -320,3 +350,64 @@ def test_backfill_matches_existing_caz(model):
     for rec, m in zip(prof.layers, c["layer_data"]["metrics"]):
         assert rec.separation_fisher == pytest.approx(m["separation_fisher"], rel=1e-5)
         np.testing.assert_allclose(arrays["profile.directions"][rec.layer], m["dom_vector"], atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Config + parallel (projected) CAZ detection path
+# ---------------------------------------------------------------------------
+
+def _caz_and_profile(L=12, d=16, seed=0):
+    """A caz_*.json-shaped dict and a stream-only profile for the same data,
+    with one bump in separation at layer ~5."""
+    from rosetta_tools.caz import compute_coherence, compute_velocity
+    rng = np.random.default_rng(seed)
+    n = 80
+    amp = np.exp(-0.5 * ((np.arange(L) - 5) / 1.5) ** 2) * 3 + 0.2
+    pos = rng.normal(size=(L, n, d)); neg = rng.normal(size=(L, n, d))
+    pos[:, :, 0] += amp[:, None]
+    seps = [compute_separation(pos[l], neg[l]) for l in range(L)]
+    vel = compute_velocity(seps, window=3)
+    metrics = []
+    for l in range(L):
+        dv = pos[l].mean(0) - neg[l].mean(0)
+        metrics.append(dict(layer=l, separation_fisher=seps[l], coherence=compute_coherence(pos[l], neg[l]),
+                            raw_distance=float(np.linalg.norm(dv)), dom_vector=(dv / np.linalg.norm(dv)).tolist(),
+                            velocity=float(vel[l])))
+    caz = dict(model_id="m", concept="c", n_pairs=n, layer_data=dict(n_layers=L, metrics=metrics))
+    prof, _, _ = build_layer_profile(pos, neg, n_perm=0, stream_source="hidden_states")
+    return caz, prof
+
+
+class TestConfigAndDetection:
+    def test_config_defaults_and_legacy(self):
+        from rosetta_tools.gem import GEMExtractionConfig
+        c = GEMExtractionConfig()
+        assert c.layer_profile and c.sublayer_capture and c.store_full_sublayer_activations
+        assert c.store_post_final_norm and not c.inline_directions
+        assert c.n_permutations == 200 and c.detection_score == "fisher"
+        lg = GEMExtractionConfig.legacy()
+        assert not (lg.layer_profile or lg.sublayer_capture or lg.store_full_sublayer_activations
+                    or lg.store_post_final_norm)
+
+    def test_default_build_unchanged(self):
+        from rosetta_tools.gem import build_concept_gem
+        caz, prof = _caz_and_profile()
+        a = gem_to_dict(build_concept_gem(caz))
+        b = gem_to_dict(build_concept_gem(caz, layer_profile=prof))
+        b.pop("layer_profile"); a.pop("layer_profile")
+        assert a == b and a["caz_detection_score"] == "fisher"
+
+    def test_projected_detection_path(self):
+        from rosetta_tools.gem import build_concept_gem, find_caz_regions_projected, projected_layer_metrics
+        caz, prof = _caz_and_profile()
+        lm = projected_layer_metrics(caz, prof)
+        assert [m.separation for m in lm] == [r.separation_projected for r in prof.layers]
+        regions = find_caz_regions_projected(caz, prof)
+        assert regions.n_regions >= 1
+        assert any(r.start <= 5 <= r.end for r in regions.regions)
+        g = build_concept_gem(caz, layer_profile=prof, detection_score="projected")
+        assert g.caz_detection_score == "projected" and g.n_nodes == regions.n_regions
+        with pytest.raises(ValueError):
+            build_concept_gem(caz, detection_score="projected")
+        with pytest.raises(ValueError):
+            build_concept_gem(caz, detection_score="bogus")

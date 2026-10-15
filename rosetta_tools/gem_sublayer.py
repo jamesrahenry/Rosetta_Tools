@@ -49,6 +49,7 @@ from rosetta_tools.caz import compute_separation
 from rosetta_tools.gem import (
     ArchitectureFlags,
     ConceptGEM,
+    GEMExtractionConfig,
     LayerProfile,
     LayerRecord,
     PermutationNull,
@@ -99,8 +100,14 @@ SIDECAR_DOCS: dict[str, dict] = {
     "profile.recon_residual_rel_stream": {"axes": "example, layer", "description": "||Delta - a - m|| / ||x_out||"},
     "profile.null_projected": {"axes": "layer+1 (row 0 = embedding), perm", "description": "permutation null samples, separation_projected"},
     "profile.null_fisher": {"axes": "layer+1 (row 0 = embedding), perm", "description": "permutation null samples, separation_fisher"},
-    "profile.attn_acts": {"axes": "layer, example, hidden", "description": "OPTIONAL raw pooled attention writes (float16)"},
-    "profile.mlp_acts": {"axes": "layer, example, hidden", "description": "OPTIONAL raw pooled MLP writes (float16)"},
+    "profile.attn_acts": {"axes": "layer, example, hidden", "description": "raw pooled attention writes (float16; store_full_sublayer_activations)"},
+    "profile.mlp_acts": {"axes": "layer, example, hidden", "description": "raw pooled MLP writes (float16; store_full_sublayer_activations)"},
+    "profile.final_norm_mean_pos": {"axes": "hidden", "description": "post-final-norm stream (hidden_states[-1]) mean, positive"},
+    "profile.final_norm_mean_neg": {"axes": "hidden", "description": "post-final-norm stream mean, negative"},
+    "profile.final_norm_direction": {"axes": "hidden", "description": "unit mean-diff of the post-final-norm stream"},
+    "profile.proj_final_norm": {"axes": "example", "description": "per-example projection of post-final-norm stream onto its direction"},
+    "profile.final_norm_null_projected": {"axes": "perm", "description": "permutation null samples, separation_projected, post-final-norm"},
+    "profile.final_norm_null_fisher": {"axes": "perm", "description": "permutation null samples, separation_fisher, post-final-norm"},
 }
 
 
@@ -286,7 +293,9 @@ def build_layer_profile(
     architecture: ArchitectureFlags | None = None,
     provenance: Provenance | None = None,
     stream_source: str = "decoder_layer_output",
-    store_full_sublayer_acts: bool = False,
+    store_full_sublayer_acts: bool = True,
+    final_norm_pos: np.ndarray | None = None,
+    final_norm_neg: np.ndarray | None = None,
 ) -> tuple[LayerProfile, dict[str, np.ndarray], dict[str, dict]]:
     """Per-layer records at every layer (numpy only, no model needed).
 
@@ -299,6 +308,12 @@ def build_layer_profile(
     attn_*/mlp_* : (L, n, d) sublayer writes as added to the stream (from
         capture_sublayer_activations). Optional; both or neither.
     n_perm : label permutations per layer (0 disables the nulls).
+    store_full_sublayer_acts : put the raw attn/mlp writes in the sidecar
+        too (float16). Default on (James, 2026-10-15); only applies when
+        sublayers are given.
+    final_norm_pos/neg : (n, d) post-final-norm stream at the last layer
+        (hidden_states[-1]); recorded as profile.final_norm alongside the raw
+        block output in layers[-1].
 
     Returns (profile, arrays, array_docs); pass arrays/array_docs to
     save_gem(..., arrays=, array_docs=) so they land in the sidecar.
@@ -434,6 +449,22 @@ def build_layer_profile(
         arrays["profile.null_projected"] = np.stack(null_p_rows).astype(np.float32)
         arrays["profile.null_fisher"] = np.stack(null_f_rows).astype(np.float32)
 
+    final_rec = None
+    if final_norm_pos is not None and final_norm_neg is not None:
+        fp = np.asarray(final_norm_pos, dtype=np.float64)
+        fn = np.asarray(final_norm_neg, dtype=np.float64)
+        _check_finite("final_norm", fp, fn)
+        final_rec, u_f, fnp, fnf = _stream_record(L - 1, fp, fn, n_perm, seed)
+        final_rec.sidecar_row = None
+        final_rec.cos_prev_direction = float(u_f @ directions[L - 1])  # vs raw block output
+        arrays["profile.final_norm_mean_pos"] = fp.mean(0).astype(np.float32)
+        arrays["profile.final_norm_mean_neg"] = fn.mean(0).astype(np.float32)
+        arrays["profile.final_norm_direction"] = u_f.astype(np.float32)
+        arrays["profile.proj_final_norm"] = (np.concatenate([fp, fn], 0) @ u_f).astype(np.float32)
+        if n_perm > 0:
+            arrays["profile.final_norm_null_projected"] = fnp.astype(np.float32)
+            arrays["profile.final_norm_null_fisher"] = fnf.astype(np.float32)
+
     prov = provenance or Provenance(method="build_layer_profile")
     prov = replace(
         prov,
@@ -444,7 +475,7 @@ def build_layer_profile(
     )
     profile = LayerProfile(
         n_layers=L, hidden_dim=d, layers=records, embedding=embedding_rec,
-        stream_source=stream_source, architecture=arch, provenance=prov,
+        final_norm=final_rec, stream_source=stream_source, architecture=arch, provenance=prov,
     )
     docs = {k: SIDECAR_DOCS[k] for k in arrays if k in SIDECAR_DOCS}
     return profile, arrays, docs
@@ -611,6 +642,8 @@ def resolve_architecture(model) -> ArchitectureFlags:
         flags.attn_hook, flags.mlp_hook = "self_attn", "fc2"
         if not getattr(cfg, "do_layer_norm_before", True):
             flags.post_ln = True
+    elif hasattr(l0, "self_attn") and hasattr(l0, "block_sparse_moe"):
+        flags.attn_hook, flags.mlp_hook = "self_attn", "block_sparse_moe"  # Mixtral
     elif hasattr(l0, "self_attn") and hasattr(l0, "mlp"):
         flags.attn_hook, flags.mlp_hook = "self_attn", "mlp"
     elif hasattr(l0, "attn") and hasattr(l0, "mlp"):
@@ -624,6 +657,27 @@ def resolve_architecture(model) -> ArchitectureFlags:
             f"unknown decoder block layout {flags.decoder_class} (model_type={mt}); "
             f"children={[n for n, _ in l0.named_children()]}"
         )
+
+    mlp_mod = getattr(l0, flags.mlp_hook)
+    if hasattr(mlp_mod, "experts") or hasattr(mlp_mod, "gate") and "moe" in type(mlp_mod).__name__.lower():
+        flags.moe = True
+        flags.notes.append("MoE MLP: hooked write = router-weighted expert sum (+ shared expert if any)")
+
+    # Final norm: the module producing hidden_states[-1]. Sibling of the
+    # layer list. OPT with project_out applies a projection AFTER the norm,
+    # so the norm output is not hidden_states[-1] there -> not recorded.
+    parent = model if "." not in path else _get_attr_path(model, path.rsplit(".", 1)[0])
+    prefix = "" if "." not in path else path.rsplit(".", 1)[0] + "."
+    for name in ("norm", "ln_f", "final_layer_norm", "final_norm"):
+        mod = getattr(parent, name, None)
+        if mod is not None and hasattr(mod, "register_forward_hook"):
+            if getattr(parent, "project_out", None) is not None:
+                flags.notes.append(f"{prefix}{name} is followed by project_out; post-final-norm stream not recorded")
+            else:
+                flags.final_norm_hook = prefix + name
+            break
+    else:
+        flags.notes.append("no final norm module found; post-final-norm stream not recorded")
 
     if mt in ("gptj", "codegen", "phi"):
         flags.parallel_block = True
@@ -653,6 +707,8 @@ class SublayerCapture:
     model_dtype: str
     max_recon_rel_stream: float  # max ||Delta - a - m|| / ||x_out|| over examples, layers
     max_continuity_gap: float    # max |stream_in[l] - stream[l-1]|, should be 0
+    max_recon_rel_stream_per_layer: list | None = None  # per-layer max of the above residual
+    final_norm: np.ndarray | None = None  # (n, d) post-final-norm stream (hidden_states[-1])
 
 
 def _first_tensor(out):
@@ -669,6 +725,7 @@ def capture_sublayer_activations(
     max_length: int = 512,
     allow_inexact: bool = False,
     tol: float | None = None,
+    capture_final_norm: bool = True,
 ) -> SublayerCapture:
     """Run `texts` through `model` with forward hooks on every decoder block
     (input and output) and on its attention/MLP writes; pool each capture
@@ -702,6 +759,7 @@ def capture_sublayer_activations(
     L = len(layers)
     state: dict[str, Any] = {}
     buf = {k: [[] for _ in range(L)] for k in ("in", "out", "attn", "mlp")}
+    final_buf: list = []
 
     def put(kind, i, t):
         t = _first_tensor(t)
@@ -722,6 +780,11 @@ def capture_sublayer_activations(
             lambda m, a, o, i=i: put("attn", i, o)))
         handles.append(getattr(layer, arch.mlp_hook).register_forward_hook(
             lambda m, a, o, i=i: put("mlp", i, o)))
+    if capture_final_norm and arch.final_norm_hook:
+        def fin(mod, a, o):
+            t = _first_tensor(o)
+            final_buf.append(_pool(t, state["mask"], strategy=pool).detach().float().cpu().numpy())
+        handles.append(_get_attr_path(model, arch.final_norm_hook).register_forward_hook(fin))
 
     model_dtype = str(next(model.parameters()).dtype).replace("torch.", "")
     try:
@@ -758,10 +821,20 @@ def capture_sublayer_activations(
         arch.additivity_expected_exact = False
         arch.notes.append("additivity check failed: " + "; ".join(problems))
 
+    final = None
+    if final_buf:
+        final = np.concatenate(final_buf, 0)
+        if final.shape != cat["out"][-1].shape:
+            # norm module fired more/less than once per forward (reused?)
+            arch.notes.append(f"final norm hook shape {final.shape} != stream; dropped")
+            final = None
+
     return SublayerCapture(
         embed=cat["in"][0], stream=cat["out"], attn=cat["attn"], mlp=cat["mlp"],
         architecture=arch, model_dtype=model_dtype,
         max_recon_rel_stream=max_rel, max_continuity_gap=gap,
+        max_recon_rel_stream_per_layer=rel.max(axis=1).tolist(),
+        final_norm=final,
     )
 
 
@@ -772,47 +845,52 @@ def extract_concept_layer_profile(
     neg_texts: list[str],
     model_id: str = "",
     device: str = "cpu",
-    batch_size: int = 8,
-    pool: str = "last",
-    max_length: int = 512,
-    n_perm: int = 200,
-    seed: int = 0,
-    allow_inexact: bool = False,
-    store_full_sublayer_acts: bool = False,
+    config: GEMExtractionConfig | None = None,
     dataset: str | None = None,
 ) -> tuple[LayerProfile, dict[str, np.ndarray], dict[str, dict]]:
-    """Capture + build_layer_profile for one concept's contrastive texts.
-    Returns (profile, arrays, array_docs) for save_gem(..., arrays=...)."""
-    cap_p = capture_sublayer_activations(model, tokenizer, pos_texts, device, batch_size,
-                                         pool, max_length, allow_inexact)
-    cap_n = capture_sublayer_activations(model, tokenizer, neg_texts, device, batch_size,
-                                         pool, max_length, allow_inexact)
+    """Capture + build_layer_profile for one concept's contrastive texts,
+    driven by a GEMExtractionConfig (default: GEMExtractionConfig(), i.e.
+    everything on). Returns (profile, arrays, array_docs) for
+    save_gem(..., arrays=, array_docs=, inline_directions=config.inline_directions)."""
+    cfg = config or GEMExtractionConfig()
+    kw = dict(device=device, batch_size=cfg.batch_size, pool=cfg.pooling,
+              max_length=cfg.max_length, allow_inexact=cfg.allow_inexact,
+              tol=cfg.additivity_tol, capture_final_norm=cfg.store_post_final_norm)
+    cap_p = capture_sublayer_activations(model, tokenizer, pos_texts, **kw)
+    cap_n = capture_sublayer_activations(model, tokenizer, neg_texts, **kw)
     arch = cap_p.architecture
     if not cap_n.architecture.additivity_expected_exact:
         arch = replace(arch, additivity_expected_exact=False,
                        notes=arch.notes + [n for n in cap_n.architecture.notes if n not in arch.notes])
     lp = arch.layer_path
+    hooks = {
+        "stream_in": f"{lp}.{{l}} (forward pre-hook, hidden_states arg)",
+        "stream_out": f"{lp}.{{l}} (forward hook, output[0])",
+        "attn": f"{lp}.{{l}}.{arch.attn_hook} (forward hook, output[0])",
+        "mlp": f"{lp}.{{l}}.{arch.mlp_hook} (forward hook, output[0])",
+    }
+    if cap_p.final_norm is not None:
+        hooks["final_norm"] = f"{arch.final_norm_hook} (forward hook, output)"
+    per_layer = np.maximum(cap_p.max_recon_rel_stream_per_layer, cap_n.max_recon_rel_stream_per_layer)
     prov = Provenance(
         method="extract_concept_layer_profile: forward hooks on decoder blocks + sublayers, "
                "pooled per example, class statistics in float64",
         model_id=model_id or getattr(getattr(model, "config", None), "_name_or_path", ""),
         model_dtype=cap_p.model_dtype,
         capture_dtype="float32",
-        hook_points={
-            "stream_in": f"{lp}.{{l}} (forward pre-hook, hidden_states arg)",
-            "stream_out": f"{lp}.{{l}} (forward hook, output[0])",
-            "attn": f"{lp}.{{l}}.{arch.attn_hook} (forward hook, output[0])",
-            "mlp": f"{lp}.{{l}}.{arch.mlp_hook} (forward hook, output[0])",
-        },
-        pooling=pool, max_length=max_length, batch_size=batch_size, device=str(device),
-        dataset=dataset,
-        notes=[f"max recon residual rel stream: pos {cap_p.max_recon_rel_stream:.3g}, "
-               f"neg {cap_n.max_recon_rel_stream:.3g}"],
+        hook_points=hooks,
+        pooling=cfg.pooling, max_length=cfg.max_length, batch_size=cfg.batch_size,
+        device=str(device), dataset=dataset,
+        notes=[f"additivity tol: {cfg.additivity_tol if cfg.additivity_tol is not None else ADDITIVITY_TOL.get(cap_p.model_dtype)}",
+               "max recon residual rel stream per layer: "
+               + ", ".join(f"{x:.3g}" for x in per_layer)],
     )
     return build_layer_profile(
         cap_p.stream, cap_n.stream, cap_p.embed, cap_n.embed,
         cap_p.attn, cap_n.attn, cap_p.mlp, cap_n.mlp,
-        n_perm=n_perm, seed=seed, architecture=arch, provenance=prov,
-        stream_source="decoder_layer_output",
-        store_full_sublayer_acts=store_full_sublayer_acts,
+        n_perm=cfg.n_permutations, seed=cfg.permutation_seed, architecture=arch,
+        provenance=prov, stream_source="decoder_layer_output",
+        store_full_sublayer_acts=cfg.store_full_sublayer_activations,
+        final_norm_pos=cap_p.final_norm if cfg.store_post_final_norm else None,
+        final_norm_neg=cap_n.final_norm if cfg.store_post_final_norm else None,
     )

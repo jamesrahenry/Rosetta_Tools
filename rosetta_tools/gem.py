@@ -366,6 +366,9 @@ class LayerRecord:
     # (expensive; see extract_settled_subspace caution).
     settled_subspace: SettledSubspace | None = None
     sidecar_row: int | None = None                   # row in stacked sidecar arrays
+    # u_l inline. None by default (directions live in the sidecar); filled
+    # only when saved with save_gem(..., inline_directions=True).
+    direction: list | None = None
 
 
 @dataclass
@@ -386,6 +389,12 @@ class ArchitectureFlags:
     sublayer_post_norm: bool = False
     # Post-LN (norm applied to x + sublayer): additivity does not hold.
     post_ln: bool = False
+    # Mixture-of-experts MLP (Mixtral block_sparse_moe, Qwen2/3-MoE mlp): the
+    # hooked "mlp" write is the router-weighted sum of experts (+ any shared
+    # expert); still exactly additive, but not a single dense MLP.
+    moe: bool = False
+    # Module whose output is hidden_states[-1] (post-final-norm), if found.
+    final_norm_hook: str | None = None
     additivity_expected_exact: bool = True
     notes: list = field(default_factory=list)
 
@@ -398,6 +407,10 @@ class LayerProfile:
     hidden_dim: int
     layers: list[LayerRecord]
     embedding: LayerRecord | None = None
+    # Post-final-norm stream at the LAST layer (= hidden_states[-1], what the
+    # existing caz_*.json data holds at layer n_layers-1), alongside the raw
+    # block output in layers[-1]. No sublayer fields (not a block write).
+    final_norm: LayerRecord | None = None
     stream_source: str = "decoder_layer_output"      # or "hidden_states"
     direction_convention: str = (
         "GEM layer l = output of decoder block l; u_in = unit mean-diff of the "
@@ -437,6 +450,52 @@ class SidecarRef:
     format: str = "npz"
     sha256: str = ""
     arrays: dict = field(default_factory=dict)  # key -> {shape, dtype, axes, description}
+
+
+@dataclass
+class GEMExtractionConfig:
+    """One switchboard for what a GEM build produces (2026-10-15).
+
+    Defaults = schema v2 with everything on, so net-new generation records
+    the per-layer / per-sublayer research data. GEMExtractionConfig.legacy()
+    reproduces pre-v2 output exactly (k=1 nodes from caz_*.json only).
+
+    layer_profile : build a LayerProfile at all layers.
+    sublayer_capture : capture attention/MLP writes with forward hooks (needs
+        the model + concept texts, i.e. a forward pass). False = stream-only
+        profile from calibration_alllayer_{concept}.npy (no model needed).
+    store_full_sublayer_activations : also put the raw pooled per-example
+        attn/mlp writes (float16, [L, n, d]) in the sidecar. Large (about
+        43 MB/concept at 0.5B, 147 MB at 3B).
+    store_post_final_norm : also record the post-final-norm stream at the
+        last layer (= hidden_states[-1], what existing CAZ data holds there).
+    inline_directions : also write u_l inline in the JSON (sidecar always).
+    n_permutations : label permutations per layer for the separation nulls.
+    additivity_tol : None = ADDITIVITY_TOL[model dtype].
+    allow_inexact : record (and flag) instead of raising when Delta != a + m.
+    detection_score : "fisher" (existing CAZ detector, default) or
+        "projected" (find_caz_regions_projected; research comparison path).
+    """
+
+    layer_profile: bool = True
+    sublayer_capture: bool = True
+    store_full_sublayer_activations: bool = True
+    store_post_final_norm: bool = True
+    inline_directions: bool = False
+    n_permutations: int = 200
+    permutation_seed: int = 0
+    additivity_tol: float | None = None
+    allow_inexact: bool = False
+    pooling: str = "last"
+    batch_size: int = 16
+    max_length: int = 512
+    detection_score: str = "fisher"
+
+    @classmethod
+    def legacy(cls) -> "GEMExtractionConfig":
+        """Pre-v2 behaviour: no layer profile, nothing beyond caz_*.json."""
+        return cls(layer_profile=False, sublayer_capture=False,
+                   store_full_sublayer_activations=False, store_post_final_norm=False)
 
 
 @dataclass
@@ -571,6 +630,10 @@ class ConceptGEM:
     schema_version: str = GEM_SCHEMA_VERSION
     layer_profile: LayerProfile | None = None
     sidecar: SidecarRef | None = None
+    # Which separation score drove CAZ region detection: None/"fisher" =
+    # existing detector; "projected" = find_caz_regions_projected (parallel
+    # research path, see build_concept_gem(detection_score=...)).
+    caz_detection_score: str | None = None
     # Unknown top-level keys found when loading (e.g. the n_pairs existing
     # gem_*.json files carry) -- preserved on re-save instead of dropped.
     extra: dict | None = None
@@ -928,6 +991,8 @@ def build_concept_gem(
     h_neg_by_layer: dict[int, np.ndarray] | None = None,
     compute_settled_subspace: bool = False,
     settled_subspace_kwargs: dict | None = None,
+    layer_profile: LayerProfile | None = None,
+    detection_score: str = "fisher",
 ) -> ConceptGEM:
     """Build the full ConceptGEM for one concept x model.
 
@@ -968,19 +1033,35 @@ def build_concept_gem(
     settled_subspace_kwargs : dict | None
         Passed through to attach_settled_subspace (e.g. max_rounds, n_perm)
         when compute_settled_subspace=True.
+    layer_profile : LayerProfile | None
+        Optional schema-v2 profile to attach (see rosetta_tools.gem_sublayer).
+    detection_score : "fisher" | "projected"
+        "fisher" (default) = the existing detector on separation_fisher,
+        unchanged. "projected" = the SAME detector run on the gauge-corrected
+        projected score from `layer_profile` (find_caz_regions_projected), a
+        parallel path for comparing the two (Freenor, 2026-10-14). Node
+        contents (dom_vector threads, eigenvalue proxy) still come from
+        caz_data either way; only region boundaries change.
     """
     metrics_raw = caz_data["layer_data"]["metrics"]
 
     # Detect CAZ regions
-    layer_metrics = [
-        LayerMetrics(
-            m["layer"],
-            m["separation_fisher"],
-            m["coherence"],
-            m["velocity"],
-        )
-        for m in metrics_raw
-    ]
+    if detection_score == "fisher":
+        layer_metrics = [
+            LayerMetrics(
+                m["layer"],
+                m["separation_fisher"],
+                m["coherence"],
+                m["velocity"],
+            )
+            for m in metrics_raw
+        ]
+    elif detection_score == "projected":
+        if layer_profile is None:
+            raise ValueError("detection_score='projected' requires layer_profile")
+        layer_metrics = projected_layer_metrics(caz_data, layer_profile)
+    else:
+        raise ValueError(f"detection_score must be 'fisher' or 'projected', got {detection_score!r}")
     profile = find_caz_regions_scored(
         layer_metrics,
         attention_paradigm=attention_paradigm,
@@ -992,6 +1073,8 @@ def build_concept_gem(
             model_id=caz_data.get("model_id", ""),
             n_nodes=0,
             nodes=[],
+            layer_profile=layer_profile,
+            caz_detection_score=detection_score,
         )
 
     # Sort regions by depth (already sorted by find_caz_regions_scored)
@@ -1048,6 +1131,49 @@ def build_concept_gem(
         interaction_matrix=interaction_matrix,
         node_types=node_types,
         ablation_targets=ablation_targets,
+        layer_profile=layer_profile,
+        caz_detection_score=detection_score,
+    )
+
+
+def projected_layer_metrics(caz_data: dict, layer_profile: LayerProfile) -> list[LayerMetrics]:
+    """LayerMetrics with separation = the profile's separation_projected and
+    velocity recomputed from it (compute_velocity, window=3, as extraction
+    does); coherence is taken from caz_data unchanged. At the last layer the
+    post-final-norm record is used when present, so every layer is in the
+    same space as the caz_*.json data the Fisher path uses."""
+    from rosetta_tools.caz import compute_velocity
+
+    metrics_raw = caz_data["layer_data"]["metrics"]
+    n = len(metrics_raw)
+    if layer_profile.n_layers != n:
+        raise ValueError(f"layer_profile has {layer_profile.n_layers} layers, caz_data {n}")
+    seps = [r.separation_projected for r in layer_profile.layers]
+    if layer_profile.final_norm is not None and layer_profile.final_norm.separation_projected is not None:
+        seps[-1] = layer_profile.final_norm.separation_projected
+    if any(s is None for s in seps):
+        raise ValueError("layer_profile is missing separation_projected at some layer")
+    vel = compute_velocity(seps, window=3)
+    return [LayerMetrics(m["layer"], float(s), m["coherence"], float(v))
+            for m, s, v in zip(metrics_raw, seps, vel)]
+
+
+def find_caz_regions_projected(
+    caz_data: dict,
+    layer_profile: LayerProfile,
+    attention_paradigm: str = "unknown",
+    **detector_kwargs: Any,
+) -> CAZProfile:
+    """Parallel, opt-in CAZ boundary detection: the existing scored detector
+    (find_caz_regions_scored, same thresholds) run over the gauge-corrected
+    projected separation instead of separation_fisher. Research comparison
+    path only -- the default detector is untouched. Note the detector's
+    thresholds were tuned on the Fisher scale; the projected score has a
+    different dynamic range, so differences in regions mix "better score"
+    with "untuned thresholds"."""
+    return find_caz_regions_scored(
+        projected_layer_metrics(caz_data, layer_profile),
+        attention_paradigm=attention_paradigm, **detector_kwargs,
     )
 
 
@@ -1147,6 +1273,8 @@ def _layer_profile_from_dict(d: dict | None) -> LayerProfile | None:
     d["layers"] = [_layer_record_from_dict(r) for r in d.get("layers", [])]
     if d.get("embedding"):
         d["embedding"] = _layer_record_from_dict(d["embedding"])
+    if d.get("final_norm"):
+        d["final_norm"] = _layer_record_from_dict(d["final_norm"])
     if d.get("architecture"):
         d["architecture"] = ArchitectureFlags(**_known(ArchitectureFlags, d["architecture"], "ArchitectureFlags"))
     d["provenance"] = _provenance_from_dict(d.get("provenance"))
@@ -1207,6 +1335,7 @@ def save_gem(
     path: Path,
     arrays: dict[str, np.ndarray] | None = None,
     array_docs: dict[str, dict] | None = None,
+    inline_directions: bool = False,
 ) -> ConceptGEM:
     """Save a ConceptGEM to a JSON file (always as the current schema version).
 
@@ -1216,6 +1345,11 @@ def save_gem(
         sha256, per-key shape/dtype/axes/description from array_docs). The
         JSON itself never holds them.
 
+    inline_directions : also write each LayerRecord.direction (u_l) inline
+        in the JSON (from arrays["profile.directions"]; plus the final_norm
+        record's direction from "profile.final_norm_direction" if present).
+        Off by default: the sidecar already holds them.
+
     Returns the ConceptGEM as written (with schema_version/sidecar set); the
     input object is not mutated. Existing callers that ignore the return
     value are unaffected.
@@ -1224,6 +1358,17 @@ def save_gem(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     gem = replace(gem, schema_version=GEM_SCHEMA_VERSION)
+
+    if inline_directions:
+        if gem.layer_profile is None or not arrays or "profile.directions" not in arrays:
+            raise ValueError("inline_directions=True needs a layer_profile and arrays['profile.directions']")
+        dirs = np.asarray(arrays["profile.directions"], dtype=np.float64)
+        lp = gem.layer_profile
+        new_layers = [replace(r, direction=dirs[r.layer].tolist()) for r in lp.layers]
+        fn = lp.final_norm
+        if fn is not None and "profile.final_norm_direction" in arrays:
+            fn = replace(fn, direction=np.asarray(arrays["profile.final_norm_direction"], np.float64).tolist())
+        gem = replace(gem, layer_profile=replace(lp, layers=new_layers, final_norm=fn))
 
     if arrays:
         sc_path = sidecar_path_for(path)

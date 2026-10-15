@@ -11,7 +11,7 @@ without torch.
 import numpy as np
 import pytest
 
-from rosetta_tools.gem import ConceptGEM, SettledSubspace, load_gem, save_gem
+from rosetta_tools.gem import ConceptGEM, GEMExtractionConfig, SettledSubspace, load_gem, save_gem
 from rosetta_tools.gem_sublayer import attach_layer_profile, decompose_settled_subspace
 
 # ---------------------------------------------------------------------------
@@ -52,6 +52,11 @@ def _cfg(name):
                                                  use_parallel_residual=True, **_KW),
         "opt_pre_ln": lambda: T.OPTConfig(hidden_size=64, ffn_dim=128, word_embed_proj_dim=64,
                                           do_layer_norm_before=True, **_KW),
+        "mixtral": lambda: T.MixtralConfig(hidden_size=64, intermediate_size=64, num_key_value_heads=2,
+                                           num_local_experts=4, num_experts_per_tok=2, **_KW),
+        "qwen2_moe": lambda: T.Qwen2MoeConfig(hidden_size=64, intermediate_size=64, num_key_value_heads=2,
+                                              moe_intermediate_size=32, shared_expert_intermediate_size=32,
+                                              num_experts=4, num_experts_per_tok=2, **_KW),
         "opt_post_ln": lambda: T.OPTConfig(hidden_size=64, ffn_dim=128, word_embed_proj_dim=64,
                                            do_layer_norm_before=False, **_KW),
     }[name]()
@@ -65,7 +70,8 @@ def _tiny(name, seed=0):
 TEXTS = ["the cat sat", "a considerably longer sentence for padding", "no", "it is not so"]
 
 
-@pytest.mark.parametrize("name", ["qwen2", "llama", "gemma2", "gpt2", "neox_parallel", "opt_pre_ln"])
+@pytest.mark.parametrize("name", ["qwen2", "llama", "gemma2", "gpt2", "neox_parallel", "opt_pre_ln",
+                                  "mixtral", "qwen2_moe"])
 def test_tiny_model_additivity(name):
     from rosetta_tools.gem_sublayer import capture_sublayer_activations
     model = _tiny(name)
@@ -76,9 +82,10 @@ def test_tiny_model_additivity(name):
     assert cap.max_continuity_gap == 0.0
     assert cap.architecture.sublayer_post_norm == (name == "gemma2")
     assert cap.architecture.parallel_block == (name == "neox_parallel")
+    assert cap.architecture.moe == (name in ("mixtral", "qwen2_moe"))
 
 
-@pytest.mark.parametrize("name", ["qwen2", "gpt2"])
+@pytest.mark.parametrize("name", ["qwen2", "gpt2", "neox_parallel", "gemma2", "opt_pre_ln"])
 def test_block_outputs_match_hidden_states_except_last(name):
     from rosetta_tools.gem_sublayer import capture_sublayer_activations
     model, tok = _tiny(name), _Tok()
@@ -92,8 +99,9 @@ def test_block_outputs_match_hidden_states_except_last(name):
         ref = hs[l + 1][rows, last].float().numpy()
         if l < cap.stream.shape[0] - 1:
             np.testing.assert_allclose(cap.stream[l], ref, atol=1e-6)
-        else:  # hidden_states[-1] is post-final-norm
+        else:  # hidden_states[-1] is post-final-norm; captured separately (D2)
             assert np.abs(cap.stream[l] - ref).max() > 1e-3
+            np.testing.assert_allclose(cap.final_norm, ref, atol=1e-6)
 
 
 def test_post_ln_refused_and_detected_from_data():
@@ -133,8 +141,11 @@ def test_end_to_end_tiny_qwen2(tmp_path):
     pos = [f"it is true that item {i} works" for i in range(12)]
     neg = [f"it is not true that item {i} works" for i in range(12)]
     prof, arrays, docs = extract_concept_layer_profile(
-        model, _Tok(), pos, neg, model_id="tiny-qwen2-random", batch_size=5, n_perm=10,
+        model, _Tok(), pos, neg, model_id="tiny-qwen2-random",
+        config=GEMExtractionConfig(batch_size=5, n_permutations=10),
     )
+    assert arrays["profile.attn_acts"].shape == (3, 24, 64)  # D3 default on
+    assert prof.final_norm is not None and prof.architecture.final_norm_hook == "norm"
     assert len(prof.layers) == 3 and prof.hidden_dim == 64
     assert prof.architecture.attn_hook == "self_attn"
     assert prof.provenance.model_dtype == "float32" and prof.provenance.n_pos == 12
