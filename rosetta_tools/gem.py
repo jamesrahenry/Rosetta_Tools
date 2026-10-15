@@ -27,6 +27,12 @@ Phases:
   Phase 2 (k=3+): Use deep dive eigenvectors (directions_L*.npy).
      Multi-thread selection for surgical precision.
 
+Schema v2 (2026-10-15, all optional, v1 files load unchanged): per-layer
+records at EVERY layer (LayerProfile / LayerRecord), attention-vs-MLP
+attribution per layer (SublayerRecord), provenance, and a sidecar .npz for
+large arrays (SidecarRef). Computation lives in rosetta_tools.gem_sublayer.
+Design: Notes/gem_schema_redesign_2026-10-15.md (Rosetta_Program).
+
 Usage:
     from geometric_evolution_map.gem import build_concept_gem, save_gem
     gem = build_concept_gem(caz_data, multimodal_data)
@@ -37,7 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from typing import Any
 
@@ -228,6 +234,210 @@ class SettledSubspace:
     k_effective: int = 0
     stopping_reason: str = ""
 
+    # Schema v2 (2026-10-15), optional. provenance: how/where this subspace
+    # was computed. sublayer_decomposition: each kept direction's class-mean
+    # separation split into attention / MLP writes (this layer's block and
+    # every upstream block) -- see SubspaceSublayerDecomposition.
+    provenance: Provenance | None = None
+    sublayer_decomposition: SubspaceSublayerDecomposition | None = None
+
+
+# ---------------------------------------------------------------------------
+# Schema v2 (2026-10-15): per-layer and per-sublayer research records.
+#
+# Motivation: SettledSubspace covers ONE layer and EigThread only the CAZ
+# window; the Freenor follow-ups (Notes/freenor_feedback_followups_2026-10-15
+# §1, §2, §5) need data at EVERY layer, an attention-vs-MLP split of each
+# block's write, and a gauge-corrected separation score with a null. Design
+# doc: Notes/gem_schema_redesign_2026-10-15.md.
+#
+# Conventions:
+#   - GEM layer l = output of decoder block l (= hidden_states[l+1], as in
+#     extract_layer_wise_metrics). Block l reads GEM layer l-1 (embedding
+#     output for l=0) and writes GEM layer l.
+#   - u_in  = unit class-mean-difference direction of the stream block l
+#     reads (GEM u_{l-1});  u_out = that of the stream it writes (GEM u_l).
+#     Named by role, not index, because the Freenor note indexes by block
+#     input (x_{l+1} = x_l + a_l + m_l) and is off by one from GEM's index.
+#   - Everything is optional/None so schema-v1 records and k=1 consumers are
+#     unaffected. Scalars live in the JSON; vectors and per-example arrays
+#     live in a sidecar .npz referenced by ConceptGEM.sidecar.
+# ---------------------------------------------------------------------------
+
+GEM_SCHEMA_VERSION = "2"
+
+
+@dataclass
+class Provenance:
+    """How a block of derived data was produced. Attached to the container
+    (LayerProfile, SettledSubspace, SubspaceSublayerDecomposition) and covers
+    every field inside it."""
+
+    method: str
+    code_version: str = ""
+    created_utc: str = ""
+    model_id: str = ""
+    model_dtype: str | None = None      # dtype the forward pass ran in
+    capture_dtype: str | None = None    # dtype captures were cast to (float32)
+    stats_dtype: str | None = None      # dtype statistics computed in (float64)
+    hook_points: dict | None = None     # role -> module path template
+    pooling: str | None = None
+    n_pos: int | None = None
+    n_neg: int | None = None
+    seed: int | None = None
+    n_perm: int | None = None
+    max_length: int | None = None
+    batch_size: int | None = None
+    device: str | None = None
+    dataset: str | None = None          # corpus id / split, free text
+    notes: list = field(default_factory=list)
+
+
+@dataclass
+class PermutationNull:
+    """Label-permutation null for one separation statistic at one layer.
+    The direction u is REFIT on every permutation (refitting is what the
+    observed statistic does too; a fixed u would bias the null low)."""
+
+    statistic: str                      # "separation_projected" | "separation_fisher"
+    n_perm: int
+    seed: int
+    mean: float
+    std: float
+    q95: float
+    max: float
+    p_value: float                      # (#{null >= observed} + 1) / (n_perm + 1)
+
+
+@dataclass
+class SublayerRecord:
+    """One sublayer's (attention or MLP) write at one layer, pooled per
+    example. Projections are onto the class-mean-difference directions of
+    the stream (u_in, u_out; see module conventions). "diff_proj" =
+    u . (mean_pos - mean_neg) of the sublayer output: its concept write."""
+
+    kind: str                           # "attn" | "mlp"
+    hook_point: str                     # module path actually hooked
+    diff_proj_u_in: float | None = None
+    diff_proj_u_out: float | None = None
+    pos_mean_proj_u_in: float | None = None
+    neg_mean_proj_u_in: float | None = None
+    pos_mean_proj_u_out: float | None = None
+    neg_mean_proj_u_out: float | None = None
+    var_proj_u_out: float | None = None              # pooled within-class variance
+    separation_projected_u_out: float | None = None  # diff_proj_u_out / sqrt(var)
+    # diff_proj_u_out(sublayer) / diff_proj_u_out(whole block delta). attn+mlp
+    # sum to ~1 (exactly, minus the recon residual); can be <0 or >1 when the
+    # two sublayers write in opposite directions.
+    share_of_concept_write_u_out: float | None = None
+    mean_diff_norm: float | None = None              # ||mean_pos - mean_neg||
+    cos_mean_diff_u_out: float | None = None
+    norm_mean: float | None = None                   # mean ||s||
+    norm_frac_stream_mean: float | None = None       # mean ||s|| / ||x_in||
+    norm_frac_delta_mean: float | None = None        # mean ||s|| / ||x_out - x_in||
+
+
+@dataclass
+class LayerRecord:
+    """Per-layer research record (GEM layer `layer`; -1 = embedding output).
+    Computed at every layer, not only the CAZ window."""
+
+    layer: int
+    # Separation: existing CAZ score and the gauge-corrected projected score
+    # ||mu+ - mu-|| / sqrt(1/2 u^T (S+ + S-) u), u = unit mean difference.
+    separation_fisher: float | None = None
+    separation_projected: float | None = None
+    raw_distance: float | None = None
+    projected_pooled_std: float | None = None
+    null_fisher: PermutationNull | None = None
+    null_projected: PermutationNull | None = None
+    cos_prev_direction: float | None = None          # signed cos(u_l, u_{l-1})
+    stream_norm_mean: float | None = None
+    # Whole-block write Delta = x_out - x_in (None for the embedding row)
+    delta_diff_proj_u_in: float | None = None
+    delta_diff_proj_u_out: float | None = None
+    delta_norm_mean: float | None = None
+    # Additivity check Delta == attn + mlp (pre-LN / post-sublayer-norm / parallel)
+    recon_residual_max_abs: float | None = None
+    recon_residual_max_rel_delta: float | None = None
+    recon_residual_max_rel_stream: float | None = None
+    sublayers: list[SublayerRecord] | None = None
+    # INLP at this layer -- allowed by the schema, not computed by default
+    # (expensive; see extract_settled_subspace caution).
+    settled_subspace: SettledSubspace | None = None
+    sidecar_row: int | None = None                   # row in stacked sidecar arrays
+
+
+@dataclass
+class ArchitectureFlags:
+    """Architecture facts that decide whether Delta == attn + mlp is exact
+    and what the sublayer hooks mean."""
+
+    model_type: str = "unknown"
+    decoder_class: str = ""
+    layer_path: str = ""
+    attn_hook: str | None = None
+    mlp_hook: str | None = None
+    # attn and mlp both read x_in (GPT-J, NeoX use_parallel_residual, Phi):
+    # additive, but no stream point exists between the two sublayers.
+    parallel_block: bool = False
+    # Gemma2/3: sublayer output is normed before the add; hooks are AFTER
+    # that norm, on what is actually added.
+    sublayer_post_norm: bool = False
+    # Post-LN (norm applied to x + sublayer): additivity does not hold.
+    post_ln: bool = False
+    additivity_expected_exact: bool = True
+    notes: list = field(default_factory=list)
+
+
+@dataclass
+class LayerProfile:
+    """Per-layer records across ALL layers for one concept x model."""
+
+    n_layers: int
+    hidden_dim: int
+    layers: list[LayerRecord]
+    embedding: LayerRecord | None = None
+    stream_source: str = "decoder_layer_output"      # or "hidden_states"
+    direction_convention: str = (
+        "GEM layer l = output of decoder block l; u_in = unit mean-diff of the "
+        "stream block l reads (GEM l-1, embedding for l=0); u_out = that of "
+        "the stream it writes (GEM l)."
+    )
+    architecture: ArchitectureFlags | None = None
+    provenance: Provenance | None = None
+
+    def record(self, layer: int) -> LayerRecord:
+        return self.embedding if layer == -1 else self.layers[layer]
+
+
+@dataclass
+class SubspaceSublayerDecomposition:
+    """Decomposes each SettledSubspace direction w_j's class-mean separation
+    at layer L into the writes that built it. In pre-LN models, exactly:
+        w.dmu(x_L) = w.dmu(embed) + sum_{l<=L} [w.dmu(attn_l) + w.dmu(mlp_l)]
+    (dmu = mean_pos - mean_neg). All lists are indexed [j] or [j][l]."""
+
+    layer: int
+    attn_diff_proj: list = field(default_factory=list)          # [k], block L only
+    mlp_diff_proj: list = field(default_factory=list)           # [k], block L only
+    stream_diff_proj: list = field(default_factory=list)        # [k], w.dmu(x_L)
+    embed_diff_proj: list = field(default_factory=list)         # [k]
+    upstream_attn_diff_proj: list = field(default_factory=list) # [k][L+1]
+    upstream_mlp_diff_proj: list = field(default_factory=list)  # [k][L+1]
+    reconstruction_residual: list = field(default_factory=list) # [k]
+    provenance: Provenance | None = None
+
+
+@dataclass
+class SidecarRef:
+    """Pointer to the .npz holding a GEM's large arrays."""
+
+    path: str                           # relative to the GEM JSON's directory
+    format: str = "npz"
+    sha256: str = ""
+    arrays: dict = field(default_factory=dict)  # key -> {shape, dtype, axes, description}
+
 
 @dataclass
 class GEMNode:
@@ -311,6 +521,9 @@ class GEMNode:
     # existing k=1 Phase 1 consumer.
     settled_subspace: SettledSubspace | None = None
 
+    # Unknown keys found when loading (forward compat); preserved on re-save.
+    extra: dict | None = None
+
     @property
     def concept_thread(self) -> EigThread:
         """The primary concept-carrying thread."""
@@ -353,6 +566,14 @@ class ConceptGEM:
     interaction_matrix: list[list[float]] | None = None
     node_types: list[str] | None = None
     ablation_targets: list[int] | None = None
+
+    # Schema v2 (all optional). Files without schema_version load as "1".
+    schema_version: str = GEM_SCHEMA_VERSION
+    layer_profile: LayerProfile | None = None
+    sidecar: SidecarRef | None = None
+    # Unknown top-level keys found when loading (e.g. the n_pairs existing
+    # gem_*.json files carry) -- preserved on re-save instead of dropped.
+    extra: dict | None = None
 
     @property
     def independent_nodes(self) -> list[GEMNode]:
@@ -848,43 +1069,199 @@ class _GEMEncoder(json.JSONEncoder):
 
 
 def gem_to_dict(gem: ConceptGEM) -> dict:
-    """Serialize a ConceptGEM to a JSON-safe dict."""
-    return asdict(gem)
+    """Serialize a ConceptGEM to a JSON-safe dict.
+
+    `extra` (unknown keys preserved at load time) is written back at the
+    level it came from rather than nested, so load -> save round-trips the
+    original layout (e.g. top-level n_pairs)."""
+    d = asdict(gem)
+    for nd in d["nodes"]:
+        node_extra = nd.pop("extra", None) or {}
+        for k, v in node_extra.items():
+            nd.setdefault(k, v)
+    top_extra = d.pop("extra", None) or {}
+    for k, v in top_extra.items():
+        d.setdefault(k, v)
+    return d
+
+
+def _known(cls, d: dict, where: str) -> dict:
+    """Keep only keys that are fields of `cls`; log (don't raise on) the rest.
+    Used for the nested schema-v2 types, which have no `extra` slot."""
+    names = {f.name for f in fields(cls)}
+    unknown = sorted(set(d) - names)
+    if unknown:
+        log.warning("gem_from_dict: dropping unknown keys %s in %s", unknown, where)
+    return {k: v for k, v in d.items() if k in names}
+
+
+def _split_extra(cls, d: dict, exclude: set[str] = frozenset()) -> tuple[dict, dict | None]:
+    names = {f.name for f in fields(cls)} - {"extra"}
+    known = {k: v for k, v in d.items() if k in names and k not in exclude}
+    extra = {k: v for k, v in d.items() if k not in names and k != "extra"}
+    if d.get("extra"):
+        extra = {**d["extra"], **extra}
+    return known, (extra or None)
+
+
+def _provenance_from_dict(d: dict | None) -> Provenance | None:
+    return Provenance(**_known(Provenance, d, "Provenance")) if d else None
+
+
+def _null_from_dict(d: dict | None) -> PermutationNull | None:
+    return PermutationNull(**_known(PermutationNull, d, "PermutationNull")) if d else None
+
+
+def _decomp_from_dict(d: dict | None) -> SubspaceSublayerDecomposition | None:
+    if not d:
+        return None
+    d = _known(SubspaceSublayerDecomposition, d, "SubspaceSublayerDecomposition")
+    d["provenance"] = _provenance_from_dict(d.get("provenance"))
+    return SubspaceSublayerDecomposition(**d)
+
+
+def _subspace_from_dict(d: dict | None) -> SettledSubspace | None:
+    if not d:
+        return None
+    d = _known(SettledSubspace, d, "SettledSubspace")
+    d["provenance"] = _provenance_from_dict(d.get("provenance"))
+    d["sublayer_decomposition"] = _decomp_from_dict(d.get("sublayer_decomposition"))
+    return SettledSubspace(**d)
+
+
+def _layer_record_from_dict(d: dict) -> LayerRecord:
+    d = _known(LayerRecord, d, "LayerRecord")
+    d["null_fisher"] = _null_from_dict(d.get("null_fisher"))
+    d["null_projected"] = _null_from_dict(d.get("null_projected"))
+    if d.get("sublayers") is not None:
+        d["sublayers"] = [SublayerRecord(**_known(SublayerRecord, s, "SublayerRecord"))
+                          for s in d["sublayers"]]
+    d["settled_subspace"] = _subspace_from_dict(d.get("settled_subspace"))
+    return LayerRecord(**d)
+
+
+def _layer_profile_from_dict(d: dict | None) -> LayerProfile | None:
+    if not d:
+        return None
+    d = _known(LayerProfile, d, "LayerProfile")
+    d["layers"] = [_layer_record_from_dict(r) for r in d.get("layers", [])]
+    if d.get("embedding"):
+        d["embedding"] = _layer_record_from_dict(d["embedding"])
+    if d.get("architecture"):
+        d["architecture"] = ArchitectureFlags(**_known(ArchitectureFlags, d["architecture"], "ArchitectureFlags"))
+    d["provenance"] = _provenance_from_dict(d.get("provenance"))
+    return LayerProfile(**d)
 
 
 def gem_from_dict(data: dict) -> ConceptGEM:
-    """Deserialize a ConceptGEM from a dict."""
-    nodes = []
-    for nd in data.get("nodes", []):
-        threads = [EigThread(**td) for td in nd.pop("threads", [])]
-        settled_subspace_dict = nd.pop("settled_subspace", None)
-        settled_subspace = SettledSubspace(**settled_subspace_dict) if settled_subspace_dict else None
-        nodes.append(GEMNode(threads=threads, settled_subspace=settled_subspace, **nd))
+    """Deserialize a ConceptGEM from a dict (schema v1 or v2).
 
+    v1 records (no schema_version) load with every v2 field None and
+    schema_version "1". Unknown keys at the top level or in a node are kept
+    in `extra` (and written back by gem_to_dict) rather than raising, so
+    newer files degrade gracefully in older code paths. Does not mutate
+    `data`."""
+    nodes = []
+    for raw in data.get("nodes", []):
+        nd, node_extra = _split_extra(GEMNode, raw, exclude={"threads", "settled_subspace"})
+        threads = [EigThread(**_known(EigThread, td, "EigThread")) for td in raw.get("threads", [])]
+        nodes.append(GEMNode(
+            threads=threads,
+            settled_subspace=_subspace_from_dict(raw.get("settled_subspace")),
+            extra=node_extra,
+            **nd,
+        ))
+
+    top, top_extra = _split_extra(
+        ConceptGEM, data,
+        exclude={"nodes", "layer_profile", "sidecar", "schema_version"},
+    )
+    sidecar = data.get("sidecar")
     return ConceptGEM(
-        concept=data["concept"],
-        model_id=data["model_id"],
-        n_nodes=data["n_nodes"],
         nodes=nodes,
-        interaction_matrix=data.get("interaction_matrix"),
-        node_types=data.get("node_types"),
-        ablation_targets=data.get("ablation_targets"),
+        schema_version=str(data.get("schema_version", "1")),
+        layer_profile=_layer_profile_from_dict(data.get("layer_profile")),
+        sidecar=SidecarRef(**_known(SidecarRef, sidecar, "SidecarRef")) if sidecar else None,
+        extra=top_extra,
+        **top,
     )
 
 
-def save_gem(gem: ConceptGEM, path: Path) -> None:
-    """Save a ConceptGEM to a JSON file."""
+def _sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sidecar_path_for(json_path: Path) -> Path:
+    """gem_<concept>.json -> gem_<concept>.sidecar.npz (same directory)."""
+    json_path = Path(json_path)
+    return json_path.with_name(json_path.stem + ".sidecar.npz")
+
+
+def save_gem(
+    gem: ConceptGEM,
+    path: Path,
+    arrays: dict[str, np.ndarray] | None = None,
+    array_docs: dict[str, dict] | None = None,
+) -> ConceptGEM:
+    """Save a ConceptGEM to a JSON file (always as the current schema version).
+
+    arrays : optional large arrays (e.g. from build_layer_profile). When
+        given they are written to a sidecar .npz next to the JSON
+        (sidecar_path_for) and indexed in ConceptGEM.sidecar (relative path,
+        sha256, per-key shape/dtype/axes/description from array_docs). The
+        JSON itself never holds them.
+
+    Returns the ConceptGEM as written (with schema_version/sidecar set); the
+    input object is not mutated. Existing callers that ignore the return
+    value are unaffected.
+    """
+    from dataclasses import replace
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    gem = replace(gem, schema_version=GEM_SCHEMA_VERSION)
+
+    if arrays:
+        sc_path = sidecar_path_for(path)
+        np.savez_compressed(sc_path, **{k: np.asarray(v) for k, v in arrays.items()})
+        docs = array_docs or {}
+        index = {
+            k: {"shape": list(np.shape(v)), "dtype": str(np.asarray(v).dtype),
+                **docs.get(k, {})}
+            for k, v in arrays.items()
+        }
+        gem = replace(gem, sidecar=SidecarRef(
+            path=sc_path.name, format="npz", sha256=_sha256(sc_path), arrays=index,
+        ))
+
     with open(path, "w") as f:
         json.dump(gem_to_dict(gem), f, indent=2, cls=_GEMEncoder)
+    return gem
 
 
 def load_gem(path: Path) -> ConceptGEM:
-    """Load a ConceptGEM from a JSON file."""
+    """Load a ConceptGEM from a JSON file (v1 or v2; never reads the sidecar)."""
     with open(path) as f:
         data = json.load(f)
     return gem_from_dict(data)
+
+
+def load_gem_sidecar(json_path: Path, gem: ConceptGEM | None = None, verify: bool = True):
+    """Open the sidecar .npz of a saved GEM (lazy np.load handle; use as a
+    mapping key -> array, close when done). Raises FileNotFoundError if the
+    GEM has no sidecar, ValueError on sha256 mismatch when verify=True."""
+    json_path = Path(json_path)
+    gem = gem or load_gem(json_path)
+    if gem.sidecar is None:
+        raise FileNotFoundError(f"{json_path} has no sidecar reference")
+    sc = json_path.parent / gem.sidecar.path
+    if verify and gem.sidecar.sha256 and _sha256(sc) != gem.sidecar.sha256:
+        raise ValueError(f"sidecar sha256 mismatch for {sc} (stale or modified)")
+    return np.load(sc, allow_pickle=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1477,3 +1854,25 @@ def attach_settled_subspace(
 
     sub = extract_settled_subspace(Xtr, ytr, Xte, yte, layer=node.handoff_layer, **extract_kwargs)
     return replace(node, settled_subspace=sub)
+
+
+# ---------------------------------------------------------------------------
+# Schema-v2 computation lives in rosetta_tools.gem_sublayer (torch imported
+# lazily there). Re-exported here lazily (PEP 562) so `from rosetta_tools.gem
+# import build_layer_profile` works without a circular import.
+# ---------------------------------------------------------------------------
+
+_SUBLAYER_EXPORTS = {
+    "build_layer_profile", "projected_separation", "attach_layer_profile",
+    "decompose_settled_subspace", "attach_layer_settled_subspaces",
+    "capture_sublayer_activations", "extract_concept_layer_profile",
+    "resolve_architecture", "find_decoder_layers", "SublayerCapture",
+    "SIDECAR_DOCS", "ADDITIVITY_TOL",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _SUBLAYER_EXPORTS:
+        from rosetta_tools import gem_sublayer
+        return getattr(gem_sublayer, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
