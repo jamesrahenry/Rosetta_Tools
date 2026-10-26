@@ -160,3 +160,31 @@ def test_end_to_end_tiny_qwen2(tmp_path):
     g2 = load_gem(tmp_path / "gem_tiny.json")
     assert g2.layer_profile.architecture.decoder_class == "Qwen2DecoderLayer"
     assert out.sidecar.sha256
+
+
+def test_hooks_are_removed_when_registration_fails_midway():
+    """Regression: handles were registered before the try/finally, so a block
+    deeper than layers[0] lacking the expected module left hooks on the model."""
+    import pytest
+    import torch
+    from transformers import Qwen2Config, Qwen2Model
+    from rosetta_tools.gem_sublayer import capture_sublayer_activations
+
+    cfg = Qwen2Config(hidden_size=32, intermediate_size=64, num_hidden_layers=3,
+                      num_attention_heads=4, num_key_value_heads=4, vocab_size=128,
+                      max_position_embeddings=64)
+    model = Qwen2Model(cfg).eval()
+    del model.layers[1].mlp
+
+    class Tok:
+        pad_token_id = 0
+        def __call__(self, texts, **kw):
+            ids = torch.randint(1, 128, (len(texts), 6))
+            return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+    with pytest.raises(AttributeError):
+        capture_sublayer_activations(model, Tok(), ["a", "b"], device="cpu", batch_size=2)
+
+    def n_hooks(m):
+        return sum(len(x._forward_hooks) + len(x._forward_pre_hooks) for x in m.modules())
+    assert n_hooks(model) == 0

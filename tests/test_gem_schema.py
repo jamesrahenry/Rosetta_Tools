@@ -460,3 +460,22 @@ class TestPairSetProvenance:
         d = pair_set_provenance(pairs, "negation", "train", 5)
         assert d["pairs_file"].endswith("negation_consensus_pairs.jsonl")
         assert d["repo_commit"] is None or len(d["repo_commit"]) == 40
+
+
+def test_load_gem_sidecar_refuses_empty_sha256(tmp_path):
+    """Regression: an empty stored hash skipped verification entirely."""
+    import json
+    import numpy as np
+    import pytest
+    from rosetta_tools.gem import ConceptGEM, SidecarRef, gem_to_dict, load_gem_sidecar
+
+    sc = tmp_path / "gem_x.sidecar.npz"
+    np.savez_compressed(sc, a=np.zeros(3))
+    gem = ConceptGEM(concept="x", model_id="m", n_nodes=0, nodes=[],
+                     sidecar=SidecarRef(path=sc.name, format="npz", sha256="", arrays={}))
+    jp = tmp_path / "gem_x.json"
+    jp.write_text(json.dumps(gem_to_dict(gem)))
+    with pytest.raises(ValueError, match="no sha256"):
+        load_gem_sidecar(jp, gem=gem)
+    with load_gem_sidecar(jp, gem=gem, verify=False) as z:
+        assert "a" in z

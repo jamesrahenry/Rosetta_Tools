@@ -668,7 +668,7 @@ def resolve_architecture(model) -> ArchitectureFlags:
     # so the norm output is not hidden_states[-1] there -> not recorded.
     parent = model if "." not in path else _get_attr_path(model, path.rsplit(".", 1)[0])
     prefix = "" if "." not in path else path.rsplit(".", 1)[0] + "."
-    for name in ("norm", "ln_f", "final_layer_norm", "final_norm"):
+    for name in ("norm", "ln_f", "final_layer_norm", "final_norm", "final_layernorm"):  # Phi: final_layernorm
         mod = getattr(parent, name, None)
         if mod is not None and hasattr(mod, "register_forward_hook"):
             if getattr(parent, "project_out", None) is not None:
@@ -770,24 +770,28 @@ def capture_sublayer_activations(
         buf[kind][i].append(pooled.detach().float().cpu().numpy())
 
     handles = []
-    for i, layer in enumerate(layers):
-        def pre(mod, args, kwargs, i=i):
-            h = args[0] if args else kwargs["hidden_states"]
-            put("in", i, h)
-        handles.append(layer.register_forward_pre_hook(pre, with_kwargs=True))
-        handles.append(layer.register_forward_hook(lambda m, a, o, i=i: put("out", i, o)))
-        handles.append(getattr(layer, arch.attn_hook).register_forward_hook(
-            lambda m, a, o, i=i: put("attn", i, o)))
-        handles.append(getattr(layer, arch.mlp_hook).register_forward_hook(
-            lambda m, a, o, i=i: put("mlp", i, o)))
-    if capture_final_norm and arch.final_norm_hook:
-        def fin(mod, a, o):
-            t = _first_tensor(o)
-            final_buf.append(_pool(t, state["mask"], strategy=pool).detach().float().cpu().numpy())
-        handles.append(_get_attr_path(model, arch.final_norm_hook).register_forward_hook(fin))
-
     model_dtype = str(next(model.parameters()).dtype).replace("torch.", "")
+    # Registration sits inside the try: resolve_architecture() inspects layers[0]
+    # only, so a block deeper in the stack may lack the expected attn/mlp module.
+    # If registration fails part-way, the finally below removes what was added
+    # instead of leaving dangling hooks on the caller's model.
     try:
+        for i, layer in enumerate(layers):
+            def pre(mod, args, kwargs, i=i):
+                h = args[0] if args else kwargs["hidden_states"]
+                put("in", i, h)
+            handles.append(layer.register_forward_pre_hook(pre, with_kwargs=True))
+            handles.append(layer.register_forward_hook(lambda m, a, o, i=i: put("out", i, o)))
+            handles.append(getattr(layer, arch.attn_hook).register_forward_hook(
+                lambda m, a, o, i=i: put("attn", i, o)))
+            handles.append(getattr(layer, arch.mlp_hook).register_forward_hook(
+                lambda m, a, o, i=i: put("mlp", i, o)))
+        if capture_final_norm and arch.final_norm_hook:
+            def fin(mod, a, o):
+                t = _first_tensor(o)
+                final_buf.append(_pool(t, state["mask"], strategy=pool).detach().float().cpu().numpy())
+            handles.append(_get_attr_path(model, arch.final_norm_hook).register_forward_hook(fin))
+
         for b in range(0, len(texts), batch_size):
             enc = tokenizer(texts[b:b + batch_size], return_tensors="pt", padding=True,
                             truncation=True, max_length=max_length)

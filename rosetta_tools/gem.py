@@ -1407,8 +1407,13 @@ def load_gem_sidecar(json_path: Path, gem: ConceptGEM | None = None, verify: boo
     if gem.sidecar is None:
         raise FileNotFoundError(f"{json_path} has no sidecar reference")
     sc = json_path.parent / gem.sidecar.path
-    if verify and gem.sidecar.sha256 and _sha256(sc) != gem.sidecar.sha256:
-        raise ValueError(f"sidecar sha256 mismatch for {sc} (stale or modified)")
+    if verify:
+        if not gem.sidecar.sha256:
+            raise ValueError(
+                f"sidecar reference for {json_path} carries no sha256; pass verify=False to load unverified"
+            )
+        if _sha256(sc) != gem.sidecar.sha256:
+            raise ValueError(f"sidecar sha256 mismatch for {sc} (stale or modified)")
     return np.load(sc, allow_pickle=False)
 
 
