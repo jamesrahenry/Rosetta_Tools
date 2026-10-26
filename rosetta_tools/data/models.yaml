@@ -153,7 +153,7 @@ models:
     quantization: null
     enabled: true
     gated: true
-    tags: []
+    tags: [rlhf-pair]
     notes: "Gated. Sparse encoder in 2048-dim — interesting architecture contrast with pythia-1b but flat CAZ."
 
   - model_id: Qwen/Qwen2.5-3B
@@ -167,7 +167,7 @@ models:
     quantization: null
     enabled: true
     gated: false
-    tags: [scale]
+    tags: [scale, rlhf-pair]
     notes: "Kept for Qwen within-family scale ladder. 36 layers for 2048-dim is unusually deep."
 
   # ===========================================================================
@@ -215,7 +215,7 @@ models:
     quantization: null
     enabled: true
     gated: true
-    tags: []
+    tags: [rlhf-pair]
     notes: "Canonical sparse-encoder baseline at 4096-dim."
 
   - model_id: meta-llama/Llama-3.1-8B-Instruct
@@ -243,7 +243,7 @@ models:
     quantization: null
     enabled: true
     gated: false
-    tags: []
+    tags: [rlhf-pair]
     notes: "Sliding window attention. SWA may affect layer-wise feature persistence."
 
   - model_id: mistralai/Mixtral-8x7B-v0.1
@@ -277,7 +277,7 @@ models:
     quantization: null
     enabled: true
     gated: false
-    tags: []
+    tags: [rlhf-pair]
     notes: "Qwen2 at 3584-dim. Fits single L4 comfortably."
 
   - model_id: google/gemma-2-9b
@@ -291,7 +291,7 @@ models:
     quantization: null
     enabled: true
     gated: false
-    tags: []
+    tags: [rlhf-pair]
     notes: >
       Alternating sliding-window + global attention. Fisher peaks are MHA
       resonance artifacts — functional CAZ is at final global attention layer.
@@ -489,7 +489,7 @@ models:
     quantization: null
     enabled: true
     gated: false
-    tags: [scale]
+    tags: [scale, rlhf-pair]
     notes: "Bottom of Qwen scale ladder."
 
   - model_id: Qwen/Qwen2.5-1.5B
@@ -503,7 +503,7 @@ models:
     quantization: null
     enabled: true
     gated: false
-    tags: [scale]
+    tags: [scale, rlhf-pair]
 
   # ===========================================================================
   # NOT IN SWEEP — registry entries for reference / CIA / future use
@@ -575,7 +575,7 @@ models:
     quantization: null
     enabled: true
     gated: false
-    tags: []
+    tags: [rlhf-pair]
     notes: "Extreme sparse encoder — alternating local/global attn; cos-threshold has no effect on feature count."
 
   - model_id: meta-llama/Llama-3.2-3B
@@ -589,7 +589,7 @@ models:
     quantization: null
     enabled: true
     gated: true
-    tags: []
+    tags: [rlhf-pair]
 
   - model_id: microsoft/phi-2
     family: phi
@@ -716,7 +716,7 @@ models:
     quantization: null
     enabled: true
     gated: false
-    tags: [instruct, rlhf-pair, abliterated]
+    tags: [instruct, abliterated]
     notes: "Ilya Gusev's weight-level refusal-abliterated gemma-2-9b-it. Same arch/size as base; device_map=auto across 2x L4. Counterpart to google/gemma-2-9b-it for the abliteration propagation comparison."
 
   - model_id: meta-llama/Llama-3.2-1B-Instruct

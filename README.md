@@ -9,7 +9,7 @@ Shared tooling for the Rosetta interpretability research program.
 Pin to a release tag — unpinned `main` can change between installs:
 
 ```bash
-pip install git+https://github.com/jamesrahenry/Rosetta_Tools.git@v2.0.0
+pip install git+https://github.com/jamesrahenry/Rosetta_Tools.git@v2.1.0
 ```
 
 `torch` and `transformers` are not declared dependencies — install the versions that suit your
@@ -38,18 +38,30 @@ Full API reference with signatures and examples: [`docs/api.md`](docs/api.md)
 | `rosetta_tools.dataset` | Load and validate JSONL contrastive pair datasets |
 | `rosetta_tools.alignment` | Procrustes rotation, cross-architecture concept alignment |
 | `rosetta_tools.ablation` | Directional ablation via forward hooks, KL divergence measurement |
-| `rosetta_tools.gem` | GEM (Geometric Evolution Map) node construction and diagnostics |
+| `rosetta_tools.gem` | GEM (Geometric Evolution Map) construction, diagnostics, Phase-2 eigen-threads, INLP settled subspace |
 | `rosetta_tools.models` | Central model and concept registry — all scripts import from here |
-| `rosetta_tools.probes` | Linear probe training and evaluation for concept directions |
+| `rosetta_tools.probes` | Probe extraction from contrastive activations: `extract_probe` (raw/fisher/auroc), `extract_gem_probe` (CAZ handoff + Fisher-weighted direction), `score_direction` |
 | `rosetta_tools.reporting` | Load CAZ checkpoint JSONs into tidy DataFrames |
 | `rosetta_tools.viz` | Standard CAZ profile plots and peak heatmaps |
 | `rosetta_tools.viz_style` | Shared style constants for Rosetta figures |
-| `rosetta_tools.compound_monitor` | Framework for cross-module evidence propagation |
+| `rosetta_tools.compound_monitor` | Vigilance thresholds: tighten an allocation threshold from cross-module evidence |
 | `rosetta_tools.paths` | Canonical data path resolution (`ROSETTA_CONCEPTS_ROOT`, repo-relative fallback) |
 
 `feature_tracker`, `manifold_detector` and `tracking` moved to
 [Rosetta_Analysis](https://github.com/jamesrahenry/Rosetta_Analysis) in May 2026; this package is
-now the reusable CAZ/GEM pipeline only.
+now the reusable CAZ/GEM pipeline only. The shell scripts in `bin/` (GPU job queue, host
+provisioning) are retired legacy tooling kept for reproducibility — see `bin/README.md`.
+
+### Which version to pin
+
+| Consumer | Pin | Why |
+|---|---|---|
+| New deployments and analysis (Monitor, CIA, Rosetta_Analysis) | **`v2.1.0`** | Current supported surface. Pair-aware train/eval split, reproducible pair sampling, blank-pair handling, CAZ record assembler, INLP settled subspace. |
+| Reproducing P1 (CAZ framework), P2 (GEM), P3 (CAZ validation), P4 (PRH) | `v1.3.1` | The version the papers cite (Zenodo `10.5281/zenodo.20361433`). Frozen; do not move. |
+| Reproducing the round-3 Gemma-2 rebuild | `v1.4.0` | As recorded in `papers/shared/round3_gpu/GEMMA2_REBUILD_NOTES.md`. |
+
+`v1.5.0` and `v1.6.0` appear as in-tree version strings in some notes and commit messages but were
+never tagged; the code they refer to shipped in `v2.0.0`.
 
 ### Quick example
 

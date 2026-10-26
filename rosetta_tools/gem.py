@@ -1208,9 +1208,14 @@ def _topk_eigvecs(hp: np.ndarray, hn: np.ndarray, k: int) -> tuple[np.ndarray, n
     """Top-k eigenvectors/eigenvalues of the paired-difference second moment
     cov(d)+mu*mu^T at one layer (same object delta-PCA's leading eigenvector
     already summarizes -- see the GEM paper's delta-PCA comparison)."""
+    if hp.shape != hn.shape:
+        raise ValueError(
+            f"_topk_eigvecs expects paired pos/neg rows of equal shape, got {hp.shape} vs {hn.shape}"
+        )
     diffs = hp - hn
     _, s, vt = np.linalg.svd(diffs, full_matrices=False)
     eigvals = (s ** 2) / diffs.shape[0]
+    k = min(k, len(eigvals))  # cannot track more threads than the difference matrix has rank
     order = np.argsort(eigvals)[::-1][:k]
     return vt[order], eigvals[order]  # (k, d), (k,)
 
@@ -1246,6 +1251,7 @@ def extract_phase2_threads(
 
     for layer in layer_indices:
         vecs, eigvals = _topk_eigvecs(h_pos_by_layer[layer], h_neg_by_layer[layer], k)
+        k = len(eigvals)  # may have been clamped to the available rank
         if dom_vectors_by_layer is not None and layer in dom_vectors_by_layer:
             dom = np.asarray(dom_vectors_by_layer[layer], dtype=np.float64)
             doms[layer] = dom / np.linalg.norm(dom)
@@ -1322,7 +1328,11 @@ def _triage_binomial_pvalue(clf, X_test: np.ndarray, y_test: np.ndarray) -> floa
     from scipy.stats import binomtest
     n = len(y_test)
     correct = int(round(clf.score(X_test, y_test) * n))
-    return float(binomtest(correct, n, p=0.5, alternative="greater").pvalue)
+    # Null = the majority-class classifier. Equals 0.5 for a balanced test set;
+    # for an imbalanced one p=0.5 would call a constant predictor "significant".
+    frac_pos = float(np.mean(y_test))
+    p_null = max(frac_pos, 1.0 - frac_pos)
+    return float(binomtest(correct, n, p=p_null, alternative="greater").pvalue)
 
 
 def _permutation_pvalue(
@@ -1369,6 +1379,16 @@ def extract_settled_subspace(
     round (X has as many or more feature dimensions as training examples),
     the triage number is a screen, not a rigorous test on its own; the
     permutation test is the trustworthy fallback.
+
+    **Status: experimental (v2.1.0).** ``k_effective`` is an *upper bound* on
+    the settled rank, not an estimate of it. With n << d the fitted logistic
+    direction is a noisy estimate of the true one; projecting it out leaves
+    residual signal ||dmu|| * sin(theta) that the next round re-detects. On
+    synthetic exactly-rank-1 data (d=512, n=250/class, 3-sigma shift) this
+    returns k_effective = 2; at d=64 it returns 3. Any claim that a settled
+    representation is "rank > 1" needs a matched rank-1 control run through
+    this same procedure (same n, d, C, split) before it means anything. Pure
+    noise correctly returns k_effective = 0.
 
     Caution (2026-09-24): the permutation test is the accuracy bottleneck --
     each ambiguous round costs n_perm refits. On a 70M-parameter model this
@@ -1451,9 +1471,8 @@ def attach_settled_subspace(
     from dataclasses import replace
     from sklearn.model_selection import train_test_split
 
-    n = h_pos.shape[0]
     X = np.concatenate([h_pos, h_neg], axis=0).astype(np.float64)
-    y = np.concatenate([np.ones(n), np.zeros(n)])
+    y = np.concatenate([np.ones(h_pos.shape[0]), np.zeros(h_neg.shape[0])])
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y)
 
     sub = extract_settled_subspace(Xtr, ytr, Xte, yte, layer=node.handoff_layer, **extract_kwargs)

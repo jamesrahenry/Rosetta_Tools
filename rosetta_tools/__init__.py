@@ -23,10 +23,25 @@ dataset     Dataset loading, validation, and pair iteration utilities.
 gem         Geometric Evolution Map (GEM) — reified CAZ assembly events for
             zone-level ablation.  EigThread, GEMNode, ConceptGEM dataclasses;
             build_concept_gem(), save_gem(), load_gem(), gem_diagnostics().
+            Phase 2: extract_phase2_threads() (k>1 eigen-threads) and
+            extract_settled_subspace() / attach_settled_subspace() (INLP rank-k
+            settled structure; SettledSubspace dataclass).
+models      YAML-backed model and concept registry (data/models.yaml,
+            data/concepts.yaml) — all_models(), get_model(), instruct_pairs(),
+            all_concepts(), concepts_by_pipeline(), ...
 reporting   Pandas-based result loading — tidy DataFrames from JSON checkpoints.
 viz         Matplotlib helpers — CAZ profiles, multi-concept overlays, peak heatmaps.
+viz_style   Figure style constants and helpers shared by every Rosetta figure
+            (no matplotlib backend import).
+compound_monitor
+            Vigilance thresholds — tighten an allocation threshold in proportion
+            to cross-module anomaly evidence (ModuleEvidence, vigilance_threshold,
+            apply_vigilance).
+paths       Canonical data path resolution (ROSETTA_DATA, ROSETTA_MODELS,
+            ROSETTA_RESULTS, ROSETTA_PAPER_N250) — identical on the dev machine
+            and GPU hosts.
 """
 
-__version__ = "2.0.0"  # keep in sync with pyproject.toml [project].version
+__version__ = "2.1.0"  # keep in sync with pyproject.toml [project].version
 __author__ = "James Henry"
 __email__ = "jamesrahenry@henrynet.ca"
