@@ -20,13 +20,17 @@ import pytest
 
 from rosetta_tools.caz import (
     CAZBoundary,
+    CAZRegion,
     LayerMetrics,
     compute_coherence,
     compute_layer_metrics,
     compute_separation,
     compute_velocity,
     find_caz_boundary,
+    find_caz_regions_scored,
 )
+
+from .conftest import make_layer_metrics_from_curve
 
 
 # ---------------------------------------------------------------------------
@@ -368,3 +372,122 @@ class TestFullPipelineRoundTrip:
         assert abs(boundary.caz_peak - 16) <= 3, (
             f"Peak at {boundary.caz_peak}, expected near 16"
         )
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestFindCazRegionsScored:
+    def _single_peak_metrics(self, peak_at: int = 8, n_layers: int = 16):
+        seps = [float(max(0, 5 - abs(i - peak_at))) for i in range(n_layers)]
+        return make_layer_metrics_from_curve(seps)
+
+    def test_single_peak_detected(self):
+        metrics = self._single_peak_metrics(peak_at=8, n_layers=16)
+        profile = find_caz_regions_scored(metrics)
+        assert profile.n_regions == 1
+        assert profile.regions[0].peak == 8
+        assert profile.regions[0].start == 0
+        assert profile.regions[0].end == 15
+        assert not profile.is_multimodal
+
+    def test_raises_on_empty_metrics(self):
+        with pytest.raises(ValueError, match="empty"):
+            find_caz_regions_scored([])
+
+    def test_flat_curve_falls_back_to_global_max(self):
+        """No local maxima at all → falls back to global argmax as a single region."""
+        seps = [3.0] * 10
+        metrics = make_layer_metrics_from_curve(seps)
+        profile = find_caz_regions_scored(metrics)
+        assert profile.n_regions == 1
+        assert profile.regions[0].start == 0
+        assert profile.regions[0].end == 9
+        assert profile.regions[0].prominence == pytest.approx(3.0)
+
+    def test_two_peaks_with_deep_valley_not_merged(self):
+        """A deep valley (well above min_valley_depth_frac) keeps two regions."""
+        seps = [1, 2, 4, 6, 8, 6, 5.8, 6, 8, 6, 4, 2, 1]
+        metrics = make_layer_metrics_from_curve(seps)
+        profile = find_caz_regions_scored(metrics)  # default min_valley_depth_frac=0.03
+        assert profile.n_regions == 2
+        assert profile.is_multimodal
+        peaks = sorted(r.peak for r in profile.regions)
+        assert peaks == [4, 8]
+        # Regions are contiguous and cover the full model
+        regions_sorted = sorted(profile.regions, key=lambda r: r.start)
+        assert regions_sorted[0].start == 0
+        assert regions_sorted[-1].end == len(seps) - 1
+        assert regions_sorted[0].end + 1 == regions_sorted[1].start
+
+    def test_valley_merge_pass_at_various_depths(self):
+        """Same two-peak curve with a shallow (0.2-deep, 2.5% of an 8.0 global
+        peak) valley: merges at the default 3% threshold, stays split when the
+        threshold is lowered below the actual valley depth, and stays split
+        when merging is disabled outright (min_valley_depth_frac=0.0)."""
+        seps = [1, 2, 4, 6, 8, 7.9, 7.8, 7.9, 8, 6, 4, 2, 1]
+        metrics = make_layer_metrics_from_curve(seps)
+
+        profile_disabled = find_caz_regions_scored(metrics, min_valley_depth_frac=0.0)
+        assert profile_disabled.n_regions == 2
+
+        profile_below_depth = find_caz_regions_scored(metrics, min_valley_depth_frac=0.01)
+        assert profile_below_depth.n_regions == 2
+
+        profile_default = find_caz_regions_scored(metrics, min_valley_depth_frac=0.03)
+        assert profile_default.n_regions == 1
+        assert profile_default.regions[0].start == 0
+        assert profile_default.regions[0].end == len(seps) - 1
+
+    def test_min_peak_distance_suppresses_close_smaller_peak(self):
+        """Two peaks 2 layers apart: both survive at the default distance=2,
+        but the smaller one is suppressed once distance exceeds the gap."""
+        seps = [1, 2, 8, 3, 9, 3, 1]
+        metrics = make_layer_metrics_from_curve(seps)
+
+        profile_default = find_caz_regions_scored(metrics, min_peak_distance=2)
+        assert profile_default.n_regions == 2
+
+        profile_wide = find_caz_regions_scored(metrics, min_peak_distance=5)
+        assert profile_wide.n_regions == 1
+        assert profile_wide.regions[0].peak == 4  # the taller (9.0) peak survives
+
+    def test_regions_sorted_by_layer_index(self):
+        seps = [1, 2, 8, 3, 9, 3, 1]
+        metrics = make_layer_metrics_from_curve(seps)
+        profile = find_caz_regions_scored(metrics, min_peak_distance=2)
+        starts = [r.start for r in profile.regions]
+        assert starts == sorted(starts)
+
+    def test_functional_score_mha_equals_geometric_score(self):
+        """MHA fisher_trust=1.0 → functional_caz_score == caz_score exactly."""
+        metrics = self._single_peak_metrics()
+        profile = find_caz_regions_scored(metrics, attention_paradigm="mha")
+        region = profile.regions[0]
+        assert region.functional_caz_score == pytest.approx(region.caz_score)
+
+    def test_functional_score_unknown_paradigm_scaled_by_default_trust(self):
+        """'unknown' fisher_trust=0.7 (ABLATION_PRIORS default)."""
+        metrics = self._single_peak_metrics()
+        profile = find_caz_regions_scored(metrics, attention_paradigm="unknown")
+        region = profile.regions[0]
+        assert region.functional_caz_score == pytest.approx(region.caz_score * 0.7)
+
+    def test_functional_score_alternating_boosts_functional_peak(self):
+        """The region containing the designated functional_peak_layer gets
+        boosted to max_caz_score regardless of its own geometric prominence;
+        other regions are scaled by the low (0.1) alternating fisher_trust."""
+        seps = [1, 2, 8, 3, 9, 3, 1]
+        metrics = make_layer_metrics_from_curve(seps)
+        profile = find_caz_regions_scored(
+            metrics,
+            min_peak_distance=2,
+            attention_paradigm="alternating",
+            functional_peak_layer=2,  # inside the smaller (8.0) peak's region
+        )
+        func_region = next(r for r in profile.regions if r.is_functional_peak)
+        other_regions = [r for r in profile.regions if not r.is_functional_peak]
+        max_caz_score = max(r.caz_score for r in profile.regions)
+        assert func_region.functional_caz_score == pytest.approx(max_caz_score)
+        for r in other_regions:
+            assert r.functional_caz_score == pytest.approx(r.caz_score * 0.1)

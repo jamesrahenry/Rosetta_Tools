@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -47,6 +47,12 @@ log = logging.getLogger(__name__)
 
 PeakMethod = Literal["raw", "fisher", "auroc"]
 ThresholdStrategy = Literal["midpoint", "target_tpr"]
+
+# Which estimator computes a concept direction from (pos, neg) activations at
+# a layer. Orthogonal to PeakMethod/direction_method (below), which control
+# *layer selection* / *how per-layer directions are combined* — this controls
+# what a single-layer direction actually is.
+DirectionEstimator = Literal["dom", "logreg", "lda"]
 
 # Two fundamentally different concept types that require different probe strategies:
 #   "semantic"      — concept assembles through transformer layers via CAZ dynamics;
@@ -79,6 +85,7 @@ class ProbeResult:
     probe_type: str = "raw"  # "raw" | "fisher" | "auroc" | "gem" | "raw_fallback"
     caz_regions: list[dict] = field(default_factory=list)
     gem_region_thresholds: list[float] = field(default_factory=list)
+    direction_estimator: str = "dom"  # "dom" | "logreg" | "lda" — see DirectionEstimator
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +134,58 @@ def _dom_direction(pos: NDArray, neg: NDArray) -> NDArray:
     return d / norm
 
 
+def _logreg_direction(pos: NDArray, neg: NDArray) -> NDArray:
+    """Logistic-regression direction, unit-normalized.
+
+    Fit with y=1 for pos / y=0 for neg so the coefficient vector points
+    pos-ward by construction, matching _dom_direction's sign convention.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    X = np.concatenate([pos, neg], axis=0)
+    y = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))])
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(X, y)
+    d = clf.coef_[0]
+    norm = np.linalg.norm(d)
+    if norm < 1e-8:
+        return d
+    return d / norm
+
+
+def _lda_direction(pos: NDArray, neg: NDArray) -> NDArray:
+    """Linear discriminant analysis direction, unit-normalized.
+
+    Fit with y=1 for pos / y=0 for neg so the coefficient vector points
+    pos-ward by construction, matching _dom_direction's sign convention.
+    """
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+    X = np.concatenate([pos, neg], axis=0)
+    y = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))])
+    clf = LinearDiscriminantAnalysis()
+    clf.fit(X, y)
+    d = clf.coef_[0]
+    norm = np.linalg.norm(d)
+    if norm < 1e-8:
+        return d
+    return d / norm
+
+
+_DIRECTION_ESTIMATORS: dict[str, Callable[[NDArray, NDArray], NDArray]] = {
+    "dom": _dom_direction,
+    "logreg": _logreg_direction,
+    "lda": _lda_direction,
+}
+
+
+def _get_direction_fn(direction_estimator: str) -> Callable[[NDArray, NDArray], NDArray]:
+    try:
+        return _DIRECTION_ESTIMATORS[direction_estimator]
+    except KeyError:
+        raise ValueError(f"Unknown direction_estimator: {direction_estimator!r}")
+
+
 def _fisher_weighted_direction(
     layer_activations: list[tuple[NDArray, NDArray]],
     layer_metrics: list,
@@ -134,12 +193,14 @@ def _fisher_weighted_direction(
     neg_train: NDArray,
     start: int,
     end: int,
+    direction_fn: Callable[[NDArray, NDArray], NDArray] = _dom_direction,
 ) -> NDArray:
-    """Fisher-weighted average DoM direction across layers [start, end].
+    """Fisher-weighted average direction across layers [start, end].
 
-    Computes a per-layer DoM direction at each layer in the region, weights
-    by Fisher separation at that layer, sign-aligns all directions to the
-    endpoint direction, and returns the normalized weighted sum.
+    Computes a per-layer direction (via ``direction_fn``, default DoM) at
+    each layer in the region, weights by Fisher separation at that layer,
+    sign-aligns all directions to the endpoint direction, and returns the
+    normalized weighted sum.
 
     Layers with zero or negative separation contribute nothing (clamped).
     If all weights are zero, falls back to equal-weight average.
@@ -149,13 +210,13 @@ def _fisher_weighted_direction(
 
     if not region_layers:
         pos_end, neg_end = layer_activations[min(end, n_layers - 1)]
-        return _dom_direction(pos_end[pos_train], neg_end[neg_train])
+        return direction_fn(pos_end[pos_train], neg_end[neg_train])
 
     per_layer_dirs: list[NDArray] = []
     weights: list[float] = []
     for l in region_layers:
         pos_l, neg_l = layer_activations[l]
-        d_l = _dom_direction(pos_l[pos_train], neg_l[neg_train])
+        d_l = direction_fn(pos_l[pos_train], neg_l[neg_train])
         w_l = max(0.0, float(layer_metrics[l].separation))
         per_layer_dirs.append(d_l)
         weights.append(w_l)
@@ -205,11 +266,12 @@ def _split_indices(
     phrasing, one attribute flipped.  Permuting the two classes independently
     therefore lets a pair straddle the split: at ``eval_frac=0.2`` each pair has
     a ``2 * 0.2 * 0.8 = 32%`` chance of having one member in train and its mate
-    in eval.  A *fitted* estimator (logistic regression, LDA) can key on that
-    training item's idiosyncratic content and score its near-identical held-out
-    mate, which inflates held-out AUROC.  A difference-of-means direction, being
-    a single centroid contrast, cannot exploit it — so the leak is not neutral
-    noise, it systematically favours fitted estimators over DoM.
+    in eval.  A *fitted* estimator (logistic regression, LDA — see
+    ``DirectionEstimator``) can key on that training item's idiosyncratic
+    content and score its near-identical held-out mate, which inflates
+    held-out AUROC.  A difference-of-means direction, being a single centroid
+    contrast, cannot exploit it — so the leak is not neutral noise, it
+    systematically favours fitted estimators over DoM.
 
     When ``paired`` (auto-detected as ``n_pos == n_neg``), one permutation over
     *pair* indices drives both class-side splits, so both members of a pair land
@@ -259,6 +321,7 @@ def extract_probe(
     eval_frac: float = 0.0,
     seed: int = 42,
     concept: str = "",
+    direction_estimator: DirectionEstimator = "dom",
 ) -> ProbeResult:
     """Extract a probe direction and threshold from contrastive layer activations.
 
@@ -299,6 +362,14 @@ def extract_probe(
         Random seed for reproducible train/eval splits.
     concept:
         Optional concept name stored in the result.
+    direction_estimator:
+        Which estimator computes the direction at the selected layer:
+        ``"dom"`` (default) — difference-of-means, matching every prior
+        release. ``"logreg"`` — logistic regression coefficient vector.
+        ``"lda"`` — linear discriminant analysis direction. Orthogonal to
+        ``method`` — with ``method="auroc"``, this also changes which
+        layer's AUROC is measured, since the auroc scan itself uses the
+        selected estimator at every layer.
 
     Returns
     -------
@@ -324,6 +395,8 @@ def extract_probe(
 
     if method == "auroc" and eval_frac <= 0:
         raise ValueError("method='auroc' requires eval_frac > 0")
+
+    direction_fn = _get_direction_fn(direction_estimator)
 
     # ── Train / eval split ────────────────────────────────────────────────
     if eval_frac > 0:
@@ -360,7 +433,7 @@ def extract_probe(
 
         sep_curve = np.zeros(n_layers)
         for li, (pos, neg) in enumerate(layer_activations):
-            d = _dom_direction(pos[pos_train], neg[neg_train])
+            d = direction_fn(pos[pos_train], neg[neg_train])
             eval_acts = np.concatenate([pos[pos_eval], neg[neg_eval]])
             eval_labels = np.array([1] * len(pos_eval) + [0] * len(neg_eval))
             scores = score_direction(eval_acts, d)
@@ -375,7 +448,7 @@ def extract_probe(
 
     # ── Direction at peak layer ───────────────────────────────────────────
     pos_acts, neg_acts = layer_activations[best_layer]
-    direction = _dom_direction(pos_acts[pos_train], neg_acts[neg_train])
+    direction = direction_fn(pos_acts[pos_train], neg_acts[neg_train])
 
     # ── Scores at peak layer (on eval data) ───────────────────────────────
     pos_scores = score_direction(pos_acts[pos_eval], direction)
@@ -425,6 +498,7 @@ def extract_probe(
         n_pos=n_pos,
         n_neg=n_neg,
         probe_type=method,
+        direction_estimator=direction_estimator,
     )
 
 
@@ -436,6 +510,7 @@ def extract_gem_probe(
     attention_paradigm: str = "unknown",
     direction_method: Literal["fisher_weighted", "endpoint"] = "fisher_weighted",
     calibration_percentile: float = 5.0,
+    direction_estimator: DirectionEstimator = "dom",
 ) -> ProbeResult:
     """Extract a probe using GEM handoff layer and region-aware direction.
 
@@ -481,6 +556,12 @@ def extract_gem_probe(
         assembly threshold (default 5.0).  Lower = more sensitive (higher recall,
         lower precision).  95% of training positives exceed the default threshold.
         Use 10–15 for production probes; 3–5 for demo/exploratory use.
+    direction_estimator:
+        Which estimator computes a single-layer direction — ``"dom"``
+        (default), ``"logreg"``, or ``"lda"``.  Orthogonal to
+        ``direction_method``: this controls what a per-layer direction is,
+        ``direction_method`` controls how per-layer directions combine
+        across the region.
 
     Returns
     -------
@@ -496,6 +577,8 @@ def extract_gem_probe(
     if n_layers == 0:
         raise ValueError("layer_activations is empty")
 
+    direction_fn = _get_direction_fn(direction_estimator)
+
     # Build CAZ profile
     layer_metrics = compute_layer_metrics(layer_activations)
     profile = find_caz_regions_scored(layer_metrics, attention_paradigm=attention_paradigm)
@@ -507,7 +590,8 @@ def extract_gem_probe(
             concept,
         )
         result = extract_probe(
-            layer_activations, method="raw", eval_frac=eval_frac, seed=seed, concept=concept
+            layer_activations, method="raw", eval_frac=eval_frac, seed=seed, concept=concept,
+            direction_estimator=direction_estimator,
         )
         result.probe_type = "raw_fallback"
         return result
@@ -528,17 +612,19 @@ def extract_gem_probe(
         pos_eval = pos_train
         neg_eval = neg_train
 
-    # Direction extraction — strategy selected by direction_method
+    # Direction extraction — strategy selected by direction_method,
+    # estimator (dom/logreg/lda) selected by direction_estimator
     if direction_method == "fisher_weighted":
         direction = _fisher_weighted_direction(
             layer_activations, layer_metrics, pos_train, neg_train,
             start=dom.start, end=dom.end,
+            direction_fn=direction_fn,
         )
     else:
-        # "endpoint": single DoM at dom.end (original GEM convention)
+        # "endpoint": single-layer direction at dom.end (original GEM convention)
         endpoint = min(dom.end, n_layers - 1)
         pos_end, neg_end = layer_activations[endpoint]
-        direction = _dom_direction(pos_end[pos_train], neg_end[neg_train])
+        direction = direction_fn(pos_end[pos_train], neg_end[neg_train])
 
     # Handoff layer: one past CAZ end, clamped
     handoff_layer = min(dom.end + 1, n_layers - 1)
@@ -619,4 +705,5 @@ def extract_gem_probe(
         probe_type=probe_type,
         caz_regions=caz_regions_meta,
         gem_region_thresholds=gem_region_thresholds,
+        direction_estimator=direction_estimator,
     )

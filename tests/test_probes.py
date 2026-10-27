@@ -18,6 +18,7 @@ import pytest
 
 from rosetta_tools.probes import (
     ProbeResult,
+    extract_gem_probe,
     extract_probe,
     _split_indices,
     score_direction,
@@ -302,3 +303,63 @@ class TestEdgeCases:
         acts = make_layer_acts(n_layers=3, hidden_dim=8, peak_layer=1)
         with pytest.raises(ValueError, match="Unknown threshold_strategy"):
             extract_probe(acts, threshold_strategy="nonsense")
+
+
+# ---------------------------------------------------------------------------
+# direction_estimator — pluggable non-DoM direction estimators
+# ---------------------------------------------------------------------------
+
+
+class TestDirectionEstimators:
+    @pytest.mark.parametrize("estimator", ["logreg", "lda"])
+    def test_direction_is_unit_norm(self, estimator):
+        acts = make_layer_acts(n_layers=5, hidden_dim=16, peak_layer=2, n=60, sep=5.0)
+        probe = extract_probe(acts, method="raw", direction_estimator=estimator)
+        assert np.linalg.norm(probe.direction) == pytest.approx(1.0, abs=1e-4)
+
+    @pytest.mark.parametrize("estimator", ["logreg", "lda"])
+    def test_sign_orientation_pos_scores_higher(self, estimator):
+        """Not just AUROC: a flipped-sign direction can still report a
+        plausible-looking (near-0) AUROC rather than an obvious crash — this
+        pins down the actual sign convention (pos scores > neg scores)."""
+        acts = make_layer_acts(n_layers=5, hidden_dim=16, peak_layer=2, n=60, sep=5.0)
+        probe = extract_probe(acts, method="raw", direction_estimator=estimator)
+        assert probe.pos_mean > probe.neg_mean
+
+    @pytest.mark.parametrize("estimator", ["logreg", "lda"])
+    @pytest.mark.parametrize("method", ["raw", "fisher", "auroc"])
+    def test_extract_probe_all_methods_accept_estimator(self, method, estimator):
+        acts = make_layer_acts(n_layers=6, hidden_dim=16, peak_layer=3, n=60, sep=6.0)
+        eval_frac = 0.2 if method == "auroc" else 0.0
+        probe = extract_probe(
+            acts, method=method, eval_frac=eval_frac, direction_estimator=estimator
+        )
+        assert probe.direction_estimator == estimator
+        assert probe.auroc > 0.7
+
+    @pytest.mark.parametrize("estimator", ["logreg", "lda"])
+    @pytest.mark.parametrize("direction_method", ["fisher_weighted", "endpoint"])
+    def test_extract_gem_probe_accepts_estimator(self, direction_method, estimator):
+        acts = make_layer_acts(n_layers=10, hidden_dim=16, peak_layer=6, n=60, sep=6.0)
+        probe = extract_gem_probe(
+            acts, direction_method=direction_method, direction_estimator=estimator,
+        )
+        assert probe.direction_estimator == estimator
+        assert np.linalg.norm(probe.direction) == pytest.approx(1.0, abs=1e-4)
+
+    def test_dom_default_matches_omitted_param(self):
+        """direction_estimator='dom' (the default) must be behavior-identical
+        to the pre-change signature — the regression guardrail for every
+        existing caller that doesn't pass the new parameter."""
+        acts = make_layer_acts(n_layers=5, hidden_dim=16, peak_layer=2, n=40, sep=5.0)
+        p_implicit = extract_probe(acts, method="raw", seed=7)
+        p_explicit = extract_probe(acts, method="raw", seed=7, direction_estimator="dom")
+        assert p_implicit.layer == p_explicit.layer
+        np.testing.assert_array_equal(p_implicit.direction, p_explicit.direction)
+        assert p_implicit.threshold == p_explicit.threshold
+        assert p_implicit.direction_estimator == "dom"
+
+    def test_unknown_estimator_raises(self):
+        acts = make_layer_acts(n_layers=3, hidden_dim=8, peak_layer=1)
+        with pytest.raises(ValueError, match="direction_estimator"):
+            extract_probe(acts, direction_estimator="nonsense")
