@@ -42,6 +42,6 @@ paths       Canonical data path resolution (ROSETTA_DATA, ROSETTA_MODELS,
             and GPU hosts.
 """
 
-__version__ = "2.1.0"  # keep in sync with pyproject.toml [project].version
+__version__ = "2.2.0"  # keep in sync with pyproject.toml [project].version
 __author__ = "James Henry"
 __email__ = "jamesrahenry@henrynet.ca"

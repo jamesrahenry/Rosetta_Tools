@@ -9,7 +9,7 @@ Shared tooling for the Rosetta interpretability research program.
 Pin to a release tag — unpinned `main` can change between installs:
 
 ```bash
-pip install git+https://github.com/jamesrahenry/Rosetta_Tools.git@v2.1.0
+pip install git+https://github.com/jamesrahenry/Rosetta_Tools.git@v2.2.0
 ```
 
 `torch` and `transformers` are not declared dependencies — install the versions that suit your
@@ -56,7 +56,7 @@ provisioning) are retired legacy tooling kept for reproducibility — see `bin/R
 
 | Consumer | Pin | Why |
 |---|---|---|
-| New deployments and analysis (Monitor, CIA, Rosetta_Analysis) | **`v2.1.0`** | Current supported surface. Pair-aware train/eval split, reproducible pair sampling, blank-pair handling, CAZ record assembler, INLP settled subspace. |
+| New deployments and analysis (Monitor, CIA, Rosetta_Analysis) | **`v2.2.0`** | Current supported surface. Pair-aware train/eval split, reproducible pair sampling, blank-pair handling, CAZ record assembler, INLP settled subspace, pluggable probe direction estimator, GEM schema v2 (per-layer / per-sublayer records), pair-set provenance. |
 | Reproducing P1 (CAZ framework), P2 (GEM), P3 (CAZ validation), P4 (PRH) | `v1.3.1` | The version the papers cite (Zenodo `10.5281/zenodo.20361433`). Frozen; do not move. |
 | Reproducing the round-3 Gemma-2 rebuild | `v1.4.0` | As recorded in `papers/shared/round3_gpu/GEMMA2_REBUILD_NOTES.md`. |
 

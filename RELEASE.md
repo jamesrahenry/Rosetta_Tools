@@ -37,18 +37,44 @@ When a change in canonical needs to be visible to consumers:
 
 ## Supported surface for downstream consumers
 
-**`v2.1.0` is the supported release for deployment and new analysis** (Monitor, CIA,
+**`v2.2.0` is the supported release for deployment and new analysis** (Monitor, CIA,
 Rosetta_Analysis). The papers' pins (`v1.3.1`; `v1.4.0` for the Gemma-2 rebuild) are frozen
-reproducibility anchors, not something to upgrade. Unreleased branches (for example
-`gem-sublayer-schema`, GEM schema v2) are not a supported surface and cannot be pinned;
-when one is merged it ships as a new tag and gets a version-log entry here.
+reproducibility anchors, not something to upgrade. Unreleased branches are not a supported surface and cannot be pinned; when one is merged it
+ships as a new tag and gets a version-log entry here.
 
 A note on **GitHub Releases vs tags**: `v1.1.0` and `v1.3.1` exist as GitHub Releases (which is
-what minted their Zenodo DOIs); `v1.2.0`, `v1.3.0`, `v1.4.0`, `v2.0.0` and `v2.1.0` are bare
+what minted their Zenodo DOIs); `v1.2.0`, `v1.3.0`, `v1.4.0`, `v2.0.0`, `v2.1.0` and `v2.2.0` are bare
 tags. Pinning by tag works either way. Create a GitHub Release only when a new DOI is wanted.
 
 ## Version log
 
+- **v2.2.0** (2026-10-26) — minor: new API; defaults and existing call sites unchanged except
+  where noted.
+  - `probes`: `extract_probe` and `extract_gem_probe` take `direction_estimator="dom"|"logreg"|"lda"`
+    (default `"dom"`, identical to every earlier release). The estimator is also used by the
+    Fisher-weighted path, and `ProbeResult.direction_estimator` records which one produced a
+    probe. Fitted estimators need the pair-aware split (v2.0.0+) to be compared fairly with
+    `"dom"`.
+  - GEM schema v2 (`GEM_SCHEMA_VERSION = "2"`): new module `gem_sublayer` and new types
+    `GEMExtractionConfig`, `LayerProfile`, `LayerRecord`, `SublayerRecord`, `PermutationNull`,
+    `ArchitectureFlags`, `Provenance`, `SubspaceSublayerDecomposition` and `SidecarRef`. Per-layer
+    separation at every layer (Fisher and gauge-corrected projected, each with a permutation
+    null), attention and MLP writes per block with an additivity check, the post-final-norm
+    record at the last layer, a mixture-of-experts path, and a checksummed `.sidecar.npz` for
+    large arrays. `save_gem` gains `arrays=`, `array_docs=` and `inline_directions=`;
+    `load_gem_sidecar`, `sidecar_path_for` and `find_caz_regions_projected` are new.
+    **Reader compatibility:** GEM JSON written with v2 fields must be read with ≥ 2.2.0 (v2.1.0's
+    loader raises on the new keys); v1 files load unchanged. Fixes folded in before tagging:
+    sublayer hooks are removed even when registration fails partway, the Phi `final_layernorm`
+    is recognised as a final norm, and an empty stored sidecar sha256 is an error unless
+    `verify=False`.
+  - `dataset.pair_set_provenance()`: sha256 over the exact ordered pairs plus the
+    Rosetta_Concept_Pairs commit, recorded in `Provenance.pair_set`, so runs that drew
+    different samples from the same `load_concept_pairs()` call can be told apart.
+  - Tests: `tests/conftest.py` shared helpers, `TestFindCazRegionsScored`,
+    `TestDirectionEstimators`, `tests/test_gem.py`, `tests/test_gem_schema.py` and
+    `tests/test_gem_sublayer_hooks.py`.
+  - `bin/gpu_daemon.sh`: `gpu_jobs` removed from the `sync_repos` set.
 - **v2.1.0** (2026-10-26) — minor: new API, no changes to existing call sites or to the
   meaning of existing artifacts.
   - `gem.extract_phase2_threads()` — the k>1 eigen-thread path that was previously a
